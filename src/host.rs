@@ -20,6 +20,13 @@ pub trait HyperHost {
     /// action it makes, if any.
     fn act(&mut self, id: &str, event: &str);
 
+    /// Counts the changes the host made on its own, signals included: a signal may change (a
+    /// checkbox ticked from elsewhere) while the tree does not, and the view redraws when this
+    /// number does. Hosts whose signals only change through the view can leave it at 0.
+    fn revision(&self) -> u64 {
+        0
+    }
+
     /// What went wrong, to show above the interface.
     fn error(&self) -> Option<String> {
         None

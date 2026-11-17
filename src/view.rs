@@ -2,12 +2,38 @@ use base64::Engine;
 use freya::prelude::*;
 use hypereffect::{Component as HeComponent, Value as Json, client::ResolvedTree, json};
 
-use crate::SharedHost;
+use crate::{
+    SharedHost,
+    skin::{
+        ButtonProps, ButtonVariant, CardProps, CheckboxProps, InputProps, ProgressProps,
+        SharedSkin, Skin, StockSkin,
+    },
+};
 
-const SPACE1: f32 = 6.;
-const SPACE2: f32 = 12.;
-const SPACE3: f32 = 20.;
-const RADIUS: f32 = 12.;
+/// The measures the view lays out with. The default is what the view always drew; change what
+/// does not fit the app around it (compact on a phone, rounder or squarer).
+#[derive(Clone, Copy, PartialEq)]
+pub struct Style {
+    /// Between the pieces of one control, and a `gap` of `small`.
+    pub space_small: f32,
+    /// Between elements (a `gap` of `medium`, the default), and inside cards.
+    pub space_medium: f32,
+    /// A `gap` of `large`, and the padding of an empty list.
+    pub space_large: f32,
+    /// Corner radius of cards and boxes.
+    pub radius: f32,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self {
+            space_small: 6.,
+            space_medium: 12.,
+            space_large: 20.,
+            radius: 12.,
+        }
+    }
+}
 
 /// Which images a server may make the renderer show.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -44,22 +70,51 @@ pub struct HyperView {
     host: SharedHost,
     rev: State<u64>,
     images: ImagePolicy,
+    style: Style,
+    skin: Option<SharedSkin>,
+    /// The host's [`revision`](crate::HyperHost::revision) when the view was made.
+    revision: u64,
 }
 
 impl HyperView {
     /// `rev` is bumped by the view after the user acts; bump it too when the host changes from
     /// outside, so the view redraws.
     pub fn new(host: SharedHost, rev: State<u64>) -> Self {
+        let revision = host.try_borrow().map_or(0, |host| host.revision());
         Self {
             host,
             rev,
             images: ImagePolicy::inline(),
+            style: Style::default(),
+            skin: None,
+            revision,
         }
     }
 
     pub fn images(mut self, images: ImagePolicy) -> Self {
         self.images = images;
         self
+    }
+
+    /// Draw the controls with `skin` instead of Freya's own components. Keep the `Rc` and hand
+    /// out clones: a view with another skin than before redraws everything.
+    pub fn skin(mut self, skin: SharedSkin) -> Self {
+        self.skin = Some(skin);
+        self
+    }
+
+    /// Lay out with other spacing and corner radius than the default.
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+}
+
+fn same_skin(a: &Option<SharedSkin>, b: &Option<SharedSkin>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => std::rc::Rc::ptr_eq(a, b),
+        _ => false,
     }
 }
 
@@ -68,6 +123,9 @@ impl PartialEq for HyperView {
         std::rc::Rc::ptr_eq(&self.host, &other.host)
             && self.rev == other.rev
             && self.images == other.images
+            && self.style == other.style
+            && same_skin(&self.skin, &other.skin)
+            && self.revision == other.revision
     }
 }
 
@@ -82,17 +140,19 @@ impl Component for HyperView {
         let host = self.host.clone();
         let rev = self.rev;
         let images = self.images;
+        let style = self.style;
+        let revision = self.revision;
 
         rect()
             .vertical()
             .width(Size::fill())
-            .spacing(SPACE2)
+            .spacing(style.space_medium)
             .map(error, |el, error| {
                 el.child(
                     rect()
                         .width(Size::fill())
-                        .padding(SPACE2)
-                        .corner_radius(RADIUS)
+                        .padding(style.space_medium)
+                        .corner_radius(style.radius)
                         .background(colors.error.with_a(40))
                         .child(txt(error, 14., colors.error, FontWeight::MEDIUM)),
                 )
@@ -103,6 +163,9 @@ impl Component for HyperView {
                     host: host.clone(),
                     rev,
                     images,
+                    style,
+                    skin: self.skin.clone(),
+                    revision,
                 }
                 .into_element()
             }))
@@ -115,6 +178,9 @@ struct NodeView {
     host: SharedHost,
     rev: State<u64>,
     images: ImagePolicy,
+    style: Style,
+    skin: Option<SharedSkin>,
+    revision: u64,
 }
 
 impl PartialEq for NodeView {
@@ -123,16 +189,29 @@ impl PartialEq for NodeView {
             && std::rc::Rc::ptr_eq(&self.host, &other.host)
             && self.rev == other.rev
             && self.images == other.images
+            && self.style == other.style
+            && same_skin(&self.skin, &other.skin)
+            && self.revision == other.revision
     }
 }
 
 impl NodeView {
+    fn skin(&self) -> &dyn Skin {
+        match &self.skin {
+            Some(skin) => &**skin,
+            None => &StockSkin,
+        }
+    }
+
     fn child(&self, node: ResolvedTree) -> Element {
         NodeView {
             node,
             host: self.host.clone(),
             rev: self.rev,
             images: self.images,
+            style: self.style,
+            skin: self.skin.clone(),
+            revision: self.revision,
         }
         .into_element()
     }
@@ -158,6 +237,7 @@ impl Component for NodeView {
             return rect().into_element();
         }
 
+        let st = self.style;
         let host = self.host.clone();
         let rev = self.rev;
         let in_row = node.component == HeComponent::Row && !attr_bool(node, "wrap", false);
@@ -186,7 +266,7 @@ impl Component for NodeView {
             HeComponent::Column => rect()
                 .vertical()
                 .width(Size::fill())
-                .spacing(gap(node))
+                .spacing(gap(node, st))
                 .cross_align(align(node, "align"))
                 .children(children)
                 .into_element(),
@@ -204,7 +284,7 @@ impl Component for NodeView {
                     _ => align(node, "align"),
                 };
                 let content = if attr_bool(node, "wrap", false) {
-                    Content::wrap_spacing(gap(node))
+                    Content::wrap_spacing(gap(node, st))
                 } else {
                     Content::flex()
                 };
@@ -212,35 +292,23 @@ impl Component for NodeView {
                     .horizontal()
                     .width(Size::fill())
                     .content(content)
-                    .spacing(gap(node))
+                    .spacing(gap(node, st))
                     .main_align(justify(node))
                     .cross_align(cross)
                     .children(children)
                     .into_element()
             }
-            HeComponent::Card => rect()
-                .vertical()
-                .width(Size::fill())
-                .padding(SPACE2)
-                .spacing(SPACE2)
-                .corner_radius(RADIUS)
-                .background(colors.surface_secondary)
-                .maybe(!attr_str(node, "title").is_empty(), |el| {
-                    el.child(txt(
-                        attr_str(node, "title"),
-                        18.,
-                        colors.text_primary,
-                        FontWeight::BOLD,
-                    ))
-                })
-                .children(children)
-                .into_element(),
+            HeComponent::Card => self.skin().card(CardProps {
+                title: Some(attr_str(node, "title")).filter(|title| !title.is_empty()),
+                children,
+                style: st,
+            }),
             HeComponent::List => {
                 let empty = attr_str(node, "empty");
                 rect()
                     .vertical()
                     .width(Size::fill())
-                    .spacing(SPACE1)
+                    .spacing(st.space_small)
                     .maybe(children.is_empty() && !empty.is_empty(), |el| {
                         el.child(txt(empty, 14., colors.text_secondary, FontWeight::NORMAL))
                     })
@@ -275,8 +343,8 @@ impl Component for NodeView {
                 let mut bar = rect()
                     .horizontal()
                     .width(Size::fill())
-                    .content(Content::wrap_spacing(SPACE1))
-                    .spacing(SPACE1);
+                    .content(Content::wrap_spacing(st.space_small))
+                    .spacing(st.space_small);
                 for tab in &tabs {
                     let pickup = tab.id.clone();
                     let host = host.clone();
@@ -301,7 +369,7 @@ impl Component for NodeView {
                 rect()
                     .vertical()
                     .width(Size::fill())
-                    .spacing(SPACE2)
+                    .spacing(st.space_medium)
                     .child(bar)
                     .child(body)
                     .into_element()
@@ -309,7 +377,7 @@ impl Component for NodeView {
             HeComponent::Tab => rect()
                 .vertical()
                 .width(Size::fill())
-                .spacing(gap(node))
+                .spacing(gap(node, st))
                 .children(children)
                 .into_element(),
             HeComponent::Dialog => {
@@ -334,9 +402,9 @@ impl Component for NodeView {
                             .vertical()
                             .width(Size::px(440.))
                             .max_width(Size::window_percent(92.))
-                            .padding(SPACE3)
-                            .spacing(SPACE2)
-                            .corner_radius(RADIUS)
+                            .padding(st.space_large)
+                            .spacing(st.space_medium)
+                            .corner_radius(st.radius)
                             .background(colors.surface_secondary)
                             .maybe(!attr_str(node, "title").is_empty(), |el| {
                                 el.child(txt(
@@ -379,9 +447,9 @@ impl Component for NodeView {
                 let color = tone_color(attr_str(node, "variant").as_str(), &colors);
                 rect()
                     .width(Size::fill())
-                    .corner_radius(RADIUS)
+                    .corner_radius(st.radius)
                     .background(color.with_a(40))
-                    .padding(SPACE2)
+                    .padding(st.space_medium)
                     .spacing(2.)
                     .maybe(!attr_str(node, "title").is_empty(), |el| {
                         el.child(txt(
@@ -421,7 +489,7 @@ impl Component for NodeView {
                 rect()
                     .width(Size::fill())
                     .height(Size::px(120.))
-                    .corner_radius(RADIUS)
+                    .corner_radius(st.radius)
                     .background(colors.surface_tertiary)
                     .center()
                     .child(txt(
@@ -440,44 +508,32 @@ impl Component for NodeView {
                 .into_element(),
             HeComponent::Progress => {
                 let value = node.attrs.get("value").and_then(Json::as_f64).unwrap_or(0.);
-                rect()
-                    .vertical()
-                    .width(Size::fill())
-                    .spacing(SPACE1)
-                    .maybe(!attr_str(node, "label").is_empty(), |el| {
-                        el.child(txt(
-                            attr_str(node, "label"),
-                            13.,
-                            colors.text_secondary,
-                            FontWeight::NORMAL,
-                        ))
-                    })
-                    .child(ProgressBar::new(value as f32).width(Size::fill()))
-                    .into_element()
+                self.skin().progress(ProgressProps {
+                    label: Some(attr_str(node, "label")).filter(|label| !label.is_empty()),
+                    fraction: value as f32,
+                    style: st,
+                })
             }
             HeComponent::Button => {
                 let enabled = !attr_bool(node, "disabled", false);
                 let host = host.clone();
                 let button_id = id.clone();
-                let on = move |_: Event<PressEventData>| {
+                let on = move |()| {
                     Self::with_host(&host, rev, |host| host.act(&button_id, "onPress"));
                 };
                 let label = attr_str(node, "label");
-                let button = Button::new().enabled(enabled).on_press(on);
-                match attr_str(node, "variant").as_str() {
-                    "primary" | "success" => button.filled().child(label).into_element(),
-                    "failure" => button
-                        .filled()
-                        .theme_colors(
-                            ButtonColorsThemePartial::new()
-                                .background(colors.error)
-                                .hover_background(colors.error.with_a(200)),
-                        )
-                        .child(label)
-                        .into_element(),
-                    "plain" => button.flat().child(label).into_element(),
-                    _ => button.outline().child(label).into_element(),
-                }
+                let variant = match attr_str(node, "variant").as_str() {
+                    "primary" | "success" => ButtonVariant::Primary,
+                    "failure" => ButtonVariant::Danger,
+                    "plain" => ButtonVariant::Plain,
+                    _ => ButtonVariant::Secondary,
+                };
+                self.skin().button(ButtonProps {
+                    label,
+                    variant,
+                    enabled,
+                    on_press: EventHandler::new(on),
+                })
             }
             HeComponent::Input => {
                 let bind = attr_str(node, "bind");
@@ -538,13 +594,14 @@ impl Component for NodeView {
                 };
                 labeled(
                     node,
-                    Input::new(WritableSetter::new(value, EventHandler::new(on_change)))
-                        .placeholder(attr_str(node, "placeholder"))
-                        .multiline(multiline)
-                        .enabled(enabled)
-                        .on_submit(on_submit)
-                        .width(Size::fill())
-                        .into_element(),
+                    self.skin().input(InputProps {
+                        value,
+                        placeholder: attr_str(node, "placeholder"),
+                        multiline,
+                        enabled,
+                        on_change: EventHandler::new(on_change),
+                        on_submit: EventHandler::new(on_submit),
+                    }),
                 )
             }
             HeComponent::Checkbox => {
@@ -558,7 +615,7 @@ impl Component for NodeView {
                 let enabled = !attr_bool(node, "disabled", false);
                 let host = host.clone();
                 let box_id = id.clone();
-                let on = move |_: Event<PointerEventData>| {
+                let on = move |()| {
                     if !bind.is_empty() {
                         Self::with_host(&host, rev, |host| {
                             host.write(&bind, Json::Bool(!value));
@@ -566,16 +623,13 @@ impl Component for NodeView {
                         });
                     }
                 };
-                rect()
-                    .horizontal()
-                    .spacing(SPACE2)
-                    .cross_align(Alignment::Center)
-                    .maybe(enabled, |el| el.on_pointer_down(on))
-                    .child(Checkbox::new().selected(value))
-                    .maybe(!label.is_empty(), |el| {
-                        el.child(txt(label, 15., colors.text_primary, FontWeight::NORMAL))
-                    })
-                    .into_element()
+                self.skin().checkbox(CheckboxProps {
+                    label,
+                    checked: value,
+                    enabled,
+                    on_toggle: EventHandler::new(on),
+                    style: st,
+                })
             }
             HeComponent::Select => {
                 let bind = attr_str(node, "bind");
@@ -612,8 +666,8 @@ impl Component for NodeView {
                     let mut row = rect()
                         .horizontal()
                         .width(Size::fill())
-                        .content(Content::wrap_spacing(SPACE1))
-                        .spacing(SPACE1);
+                        .content(Content::wrap_spacing(st.space_small))
+                        .spacing(st.space_small);
                     for (value, label) in options {
                         let is_current = value == current;
                         let host = host.clone();
@@ -671,11 +725,11 @@ impl Component for NodeView {
     }
 }
 
-fn palette() -> ColorsSheet {
+pub(crate) fn palette() -> ColorsSheet {
     get_theme_or_default().read().colors.clone()
 }
 
-fn txt(text: impl Into<String>, size: f32, color: Color, weight: FontWeight) -> Label {
+pub(crate) fn txt(text: impl Into<String>, size: f32, color: Color, weight: FontWeight) -> Label {
     label()
         .font_size(size)
         .font_weight(weight)
@@ -776,12 +830,12 @@ fn attr_num(node: &ResolvedTree, name: &str) -> Option<f64> {
     node.attrs.get(name).and_then(Json::as_f64)
 }
 
-fn gap(node: &ResolvedTree) -> f32 {
+fn gap(node: &ResolvedTree, st: Style) -> f32 {
     match attr_str(node, "gap").as_str() {
         "none" => 0.,
-        "small" => SPACE1,
-        "large" => SPACE3,
-        _ => SPACE2,
+        "small" => st.space_small,
+        "large" => st.space_large,
+        _ => st.space_medium,
     }
 }
 

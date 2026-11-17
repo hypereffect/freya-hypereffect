@@ -19,7 +19,12 @@
 //! arrived). The renderer bumps it itself after the user acts.
 
 mod host;
+mod skin;
 mod view;
 
 pub use host::{ClientHost, HyperHost, SharedHost};
-pub use view::{HyperView, ImagePolicy};
+pub use skin::{
+    ButtonProps, ButtonVariant, CardProps, CheckboxProps, InputProps, ProgressProps, SharedSkin,
+    Skin, StockSkin,
+};
+pub use view::{HyperView, ImagePolicy, Style};
