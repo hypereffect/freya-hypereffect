@@ -6,6 +6,7 @@ description = "A Freya renderer for hypereffect, drawn with Freya's own componen
 license = "MIT"
 readme = "README.md"
 documentation = "https://docs.rs/freya-hypereffect"
+repository = "https://github.com/hypereffect/freya-hypereffect"
 keywords = ["gui", "ui", "hypereffect", "freya"]
 categories = ["gui"]
 
