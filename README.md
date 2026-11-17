@@ -14,8 +14,5 @@ HyperView::new(host.clone(), rev)
 ```
 
 - `HyperHost` is what the view draws: a tree, signals, a way to act. `ClientHost` is the ready-made one over a `Client` and a function that writes lines to the server; implement the trait to drive something else (a WebAssembly app in-process).
-- Bump `rev` when the host changes from outside; the view bumps it itself after the user acts.
 - Images: only `data:` URIs by default (`ImagePolicy`). A server does not get to make the app fetch URLs or read files.
 - Buttons that ask to open a URL do nothing unless the host decides what to do with them (`ClientHost::on_open`).
-
-Uses the Freya in `../freya`. An app on another Freya revision has to point both at the same one; the hypereffect dependency is the published `0.6.3`, not a checkout.

@@ -1,10 +1,6 @@
 use base64::Engine;
 use freya::prelude::*;
-use hypereffect::{
-    Component as HeComponent, Value as Json,
-    client::ResolvedTree,
-    json,
-};
+use hypereffect::{Component as HeComponent, Value as Json, client::ResolvedTree, json};
 
 use crate::SharedHost;
 
@@ -488,9 +484,7 @@ impl Component for NodeView {
                 let path = (!bind.is_empty()).then_some(bind);
                 let number = attr_str(node, "variant") == "number";
                 let multiline = attr_str(node, "variant") == "multiline";
-                let bound = path
-                    .as_deref()
-                    .and_then(|path| host.borrow().value(path));
+                let bound = path.as_deref().and_then(|path| host.borrow().value(path));
                 // A number being typed ("1.", "-", "1e") is not yet the number it will become, so
                 // the raw text stays while it still means the bound value.
                 let value = match bound {

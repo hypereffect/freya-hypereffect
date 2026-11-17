@@ -1,6 +1,9 @@
 use std::{cell::RefCell, rc::Rc};
 
-use hypereffect::{Value as Json, client::{Client, ResolvedTree}};
+use hypereffect::{
+    Value as Json,
+    client::{Client, ResolvedTree},
+};
 
 /// What a [`HyperView`](crate::HyperView) draws and talks to.
 pub trait HyperHost {

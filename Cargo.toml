@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "A Freya renderer for hypereffect, drawn with Freya's own components and theme."
 license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/freya-hypereffect"
+keywords = ["gui", "ui", "hypereffect", "freya"]
+categories = ["gui"]
 
 [dependencies]
-freya = { path = "../freya/crates/freya" }
+freya = "0.6.0-alpha"
 hypereffect = "0.6.3"
 base64 = "0.22"
 bytes = "1"
