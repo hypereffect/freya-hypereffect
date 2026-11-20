@@ -102,7 +102,10 @@ fn stock_button(props: ButtonProps) -> Element {
         let on_press = props.on_press;
         move |_: Event<PressEventData>| on_press.call(())
     };
-    let button = Button::new().enabled(props.enabled).on_press(on);
+    let button = Button::new()
+        .enabled(props.enabled)
+        .cursor(CursorIcon::Pointer)
+        .on_press(on);
     match props.variant {
         ButtonVariant::Primary => button.filled().child(props.label).into_element(),
         ButtonVariant::Danger => button

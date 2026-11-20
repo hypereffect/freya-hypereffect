@@ -419,6 +419,7 @@ impl Component for NodeView {
                                 el.child(
                                     Button::new()
                                         .outline()
+                                        .cursor(CursorIcon::Pointer)
                                         .on_press(move |_| {
                                             Self::with_host(&host, rev, |host| {
                                                 host.act(&dismiss_id, "onDismiss")
@@ -744,7 +745,10 @@ fn choice(
     enabled: bool,
     on: impl FnMut(Event<PressEventData>) + 'static,
 ) -> Element {
-    let button = Button::new().enabled(enabled).on_press(on);
+    let button = Button::new()
+        .enabled(enabled)
+        .cursor(CursorIcon::Pointer)
+        .on_press(on);
     if current {
         button.filled().child(text).into_element()
     } else {
