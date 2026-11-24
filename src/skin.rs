@@ -43,14 +43,22 @@ pub struct InputProps {
     pub value: String,
     pub placeholder: String,
     pub multiline: bool,
+    /// Hide what is typed.
+    pub password: bool,
     pub enabled: bool,
+    /// The text, as it is typed.
     pub on_change: EventHandler<String>,
+    /// The user is done with the field: the focus left it.
+    pub on_commit: EventHandler<()>,
+    /// Enter, in a single-line field.
     pub on_submit: EventHandler<String>,
 }
 
 pub struct CheckboxProps {
     pub label: String,
     pub checked: bool,
+    /// Drawn as a switch rather than a box (the `switch` variant).
+    pub switch: bool,
     pub enabled: bool,
     /// Flip it; the view writes the new value.
     pub on_toggle: EventHandler<()>,
@@ -59,8 +67,8 @@ pub struct CheckboxProps {
 
 pub struct ProgressProps {
     pub label: Option<String>,
-    /// How far along, from 0 to 1.
-    pub fraction: f32,
+    /// How far along, from 0 to 1; `None` when it is not known (a spinner).
+    pub fraction: Option<f32>,
     pub style: Style,
 }
 
@@ -140,48 +148,112 @@ fn stock_card(props: CardProps) -> Element {
 }
 
 fn stock_input(props: InputProps) -> Element {
-    Input::new(WritableSetter::new(props.value, props.on_change))
-        .placeholder(props.placeholder)
+    StockInput(Rc::new(props)).into_element()
+}
+
+/// Freya's field, which also tells when the focus leaves it.
+#[derive(Clone)]
+struct StockInput(Rc<InputProps>);
+
+impl PartialEq for StockInput {
+    fn eq(&self, other: &Self) -> bool {
+        let (a, b) = (&*self.0, &*other.0);
+        a.value == b.value
+            && a.placeholder == b.placeholder
+            && a.multiline == b.multiline
+            && a.password == b.password
+            && a.enabled == b.enabled
+            && a.on_change == b.on_change
+            && a.on_commit == b.on_commit
+            && a.on_submit == b.on_submit
+    }
+}
+
+impl Component for StockInput {
+    fn render(&self) -> impl IntoElement {
+        let props = &*self.0;
+        let a11y_id = use_a11y();
+        let focus = use_focus(a11y_id);
+        let mut was_focused = use_state(|| false);
+        let on_commit = use_reactive(&props.on_commit);
+        use_side_effect(move || {
+            let focused = focus().is_focused();
+            if *was_focused.peek() && !focused {
+                on_commit.peek().call(());
+            }
+            if *was_focused.peek() != focused {
+                was_focused.set(focused);
+            }
+        });
+
+        let on_submit = props.on_submit.clone();
+        Input::new(WritableSetter::new(
+            props.value.clone(),
+            props.on_change.clone(),
+        ))
+        .a11y_id(a11y_id)
+        .placeholder(props.placeholder.clone())
         .multiline(props.multiline)
+        .mode(if props.password {
+            InputMode::new_password()
+        } else {
+            InputMode::Shown
+        })
         .enabled(props.enabled)
-        .on_submit(move |text: String| props.on_submit.call(text))
+        .maybe(!props.multiline, |input| {
+            input.on_submit(move |text: String| on_submit.call(text))
+        })
         .width(Size::fill())
-        .into_element()
+    }
 }
 
 fn stock_checkbox(props: CheckboxProps) -> Element {
     let colors = palette();
-    let on_toggle = props.on_toggle;
+    let CheckboxProps {
+        label,
+        checked,
+        switch,
+        enabled,
+        on_toggle,
+        style,
+    } = props;
+    let mark: Element = if switch {
+        // the switch takes the press itself
+        let on_toggle = on_toggle.clone();
+        Switch::new(WritableSetter::new(checked, move |_| on_toggle.call(())))
+            .enabled(enabled)
+            .cursor(CursorIcon::Pointer)
+            .into()
+    } else {
+        Checkbox::new().selected(checked).into()
+    };
     rect()
         .horizontal()
-        .spacing(props.style.space_medium)
+        .spacing(style.space_medium)
         .cross_align(Alignment::Center)
-        .maybe(props.enabled, |el| {
-            el.on_pointer_down(move |_: Event<PointerEventData>| on_toggle.call(()))
+        .maybe(!enabled, |el| el.opacity(0.45))
+        .a11y_role(if switch {
+            AccessibilityRole::Switch
+        } else {
+            AccessibilityRole::CheckBox
         })
-        .child(Checkbox::new().selected(props.checked))
-        .maybe(!props.label.is_empty(), |el| {
-            el.child(txt(
-                props.label,
-                15.,
-                colors.text_primary,
-                FontWeight::NORMAL,
-            ))
+        .a11y_focusable(enabled && !switch)
+        // all of the row, label included, ticks a box
+        .maybe(enabled && !switch, |el| {
+            el.on_press(move |_: Event<PressEventData>| on_toggle.call(()))
+        })
+        .child(mark)
+        .maybe(!label.is_empty(), |el| {
+            el.child(txt(label, 15., colors.text_primary, FontWeight::NORMAL))
         })
         .into_element()
 }
 
 fn stock_progress(props: ProgressProps) -> Element {
     let colors = palette();
-    let percent = props.fraction.clamp(0., 1.) * 100.;
-    rect()
-        .vertical()
-        .width(Size::fill())
-        .spacing(props.style.space_small)
-        .map(props.label, |el, label| {
-            el.child(txt(label, 13., colors.text_secondary, FontWeight::NORMAL))
-        })
-        .child(
+    let bar: Element = match props.fraction {
+        Some(fraction) => {
+            let percent = fraction.clamp(0., 1.) * 100.;
             rect()
                 .horizontal()
                 .width(Size::fill())
@@ -200,7 +272,18 @@ fn stock_progress(props: ProgressProps) -> Element {
                     13.,
                     colors.text_secondary,
                     FontWeight::NORMAL,
-                )),
-        )
+                ))
+                .into_element()
+        }
+        None => CircularLoader::new().size(28.).into_element(),
+    };
+    rect()
+        .vertical()
+        .width(Size::fill())
+        .spacing(props.style.space_small)
+        .map(props.label, |el, label| {
+            el.child(txt(label, 13., colors.text_secondary, FontWeight::NORMAL))
+        })
+        .child(bar)
         .into_element()
 }

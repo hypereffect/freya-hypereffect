@@ -17,3 +17,4 @@ HyperView::new(host.clone(), rev)
 - Images: only `data:` URIs by default (`ImagePolicy`). A server does not get to make the app fetch URLs or read files.
 - Buttons that ask to open a URL do nothing unless the host decides what to do with them (`ClientHost::on_open`).
 - A server ending the session (`close`) leaves the last interface on screen, with its reason above it, and the user can no longer act on it.
+- The server's mistakes (`diagnostics`: a message it could not apply, an expression that failed) are printed to stderr, never shown in the interface; `ClientHost::on_diagnostic` sends them elsewhere.

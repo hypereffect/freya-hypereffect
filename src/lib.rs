@@ -22,6 +22,7 @@
 //! [`HyperView`] takes a `rev` counter: bump it whenever the host changes from outside (a message
 //! arrived). The renderer bumps it itself after the user acts.
 
+mod controls;
 mod host;
 mod skin;
 mod view;

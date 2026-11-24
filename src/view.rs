@@ -1,9 +1,12 @@
+use std::{cell::RefCell, rc::Rc};
+
 use base64::Engine;
 use freya::prelude::*;
-use hypereffect::{Component as HeComponent, Value as Json, client::ResolvedTree, json};
+use hypereffect::{Component as HeComponent, Value as Json, client::ResolvedTree};
 
 use crate::{
     SharedHost,
+    controls::{Controls, Input as UserInput, slider_value},
     skin::{
         ButtonProps, ButtonVariant, CardProps, CheckboxProps, InputProps, ProgressProps,
         SharedSkin, Skin, StockSkin,
@@ -136,6 +139,10 @@ impl Component for HyperView {
             let host = self.host.borrow();
             (host.tree(), host.error(), host.is_closed())
         };
+        let controls = use_hook(|| Rc::new(RefCell::new(Controls::default())));
+        if let Ok(mut controls) = controls.try_borrow_mut() {
+            controls.retain(&tree);
+        }
         let colors = palette();
         let host = self.host.clone();
         let rev = self.rev;
@@ -157,10 +164,11 @@ impl Component for HyperView {
                         .child(txt(error, 14., colors.error, FontWeight::MEDIUM)),
                 )
             })
-            .children(tree.into_iter().map(|node| {
+            .children(tree.into_iter().filter(visible).map(|node| {
                 NodeView {
                     node,
                     host: host.clone(),
+                    controls: controls.clone(),
                     rev,
                     images,
                     style,
@@ -177,6 +185,7 @@ impl Component for HyperView {
 struct NodeView {
     node: ResolvedTree,
     host: SharedHost,
+    controls: Rc<RefCell<Controls>>,
     rev: State<u64>,
     images: ImagePolicy,
     style: Style,
@@ -188,7 +197,8 @@ struct NodeView {
 impl PartialEq for NodeView {
     fn eq(&self, other: &Self) -> bool {
         self.node == other.node
-            && std::rc::Rc::ptr_eq(&self.host, &other.host)
+            && Rc::ptr_eq(&self.host, &other.host)
+            && Rc::ptr_eq(&self.controls, &other.controls)
             && self.rev == other.rev
             && self.images == other.images
             && self.style == other.style
@@ -210,6 +220,7 @@ impl NodeView {
         NodeView {
             node,
             host: self.host.clone(),
+            controls: self.controls.clone(),
             rev: self.rev,
             images: self.images,
             style: self.style,
@@ -220,21 +231,36 @@ impl NodeView {
         .into_element()
     }
 
-    /// Run `f` on the host, then redraw. Skipped if the host is already borrowed (an action
-    /// triggered while the host is being read).
-    fn with_host(host: &SharedHost, rev: State<u64>, f: impl FnOnce(&mut dyn crate::HyperHost)) {
-        if let Ok(mut host) = host.try_borrow_mut() {
-            f(&mut *host);
+    /// Reports what the user did with this element, then redraws. Skipped if the host is
+    /// already borrowed (an action triggered while the host is being read).
+    fn on<T: 'static>(&self, input: impl Fn(T) -> UserInput + 'static) -> impl FnMut(T) + 'static {
+        let (host, controls, rev) = (self.host.clone(), self.controls.clone(), self.rev);
+        // what the controls need of it: not its children
+        let node = ResolvedTree {
+            children: Vec::new(),
+            ..self.node.clone()
+        };
+        move |value| {
+            if let (Ok(mut host), Ok(mut controls)) =
+                (host.try_borrow_mut(), controls.try_borrow_mut())
+            {
+                controls.input(&mut *host, &node, input(value));
+            }
+            bump(rev);
         }
-        bump(rev);
+    }
+
+    /// A control's value, as [`Controls::value`].
+    fn value(&self) -> Option<Json> {
+        self.controls
+            .borrow()
+            .value(&*self.host.borrow(), &self.node)
     }
 }
 
 impl Component for NodeView {
     fn render(&self) -> impl IntoElement {
         let _ = self.rev.read();
-        let mut selected = use_state(String::new);
-        let mut local = use_state(String::new);
         let node = &self.node;
         let colors = palette();
         if !attr_bool(node, "visible", true) {
@@ -242,19 +268,20 @@ impl Component for NodeView {
         }
 
         let st = self.style;
-        let host = self.host.clone();
-        let rev = self.rev;
         let in_row = node.component == HeComponent::Row && !attr_bool(node, "wrap", false);
         let children: Vec<Element> = node
             .children
             .iter()
+            .filter(|child| visible(child))
             .cloned()
             .map(|child| {
                 let grows = in_row && grows_in_row(&child);
+                let key = DiffKey::from(&child.id);
                 let child = self.child(child);
                 if grows {
                     // Text and fields share what the buttons leave of the row.
                     rect()
+                        .key(key)
                         .width(Size::flex(1.))
                         .min_width(Size::px(96.))
                         .child(child)
@@ -265,7 +292,6 @@ impl Component for NodeView {
             })
             .collect();
 
-        let id = node.id.clone();
         match node.component {
             HeComponent::Column => rect()
                 .vertical()
@@ -323,26 +349,15 @@ impl Component for NodeView {
                 let tabs: Vec<&ResolvedTree> = node
                     .children
                     .iter()
-                    .filter(|t| t.component == HeComponent::Tab && attr_bool(t, "visible", true))
+                    .filter(|t| t.component == HeComponent::Tab && visible(t))
                     .collect();
-                if tabs.is_empty() {
+                let current =
+                    self.controls
+                        .borrow()
+                        .selected_tab(&*self.host.borrow(), node, &tabs);
+                let Some(current) = current else {
                     return rect().into_element();
-                }
-                let bind = attr_str(node, "bind");
-                let bound = if bind.is_empty() {
-                    None
-                } else {
-                    host.borrow()
-                        .value(&bind)
-                        .and_then(|v| v.as_str().map(str::to_owned))
                 };
-                let current = bound
-                    .filter(|id| tabs.iter().any(|t| &t.id == id))
-                    .or_else(|| {
-                        let local = selected.read().clone();
-                        tabs.iter().any(|t| t.id == local).then_some(local)
-                    })
-                    .unwrap_or_else(|| tabs[0].id.clone());
 
                 let mut bar = rect()
                     .horizontal()
@@ -350,37 +365,20 @@ impl Component for NodeView {
                     .content(Content::wrap_spacing(st.space_small))
                     .spacing(st.space_small);
                 for tab in &tabs {
-                    let pickup = tab.id.clone();
-                    let host = host.clone();
-                    let bind = bind.clone();
-                    let tabs_id = id.clone();
-                    let on = move |_: Event<PressEventData>| {
-                        Self::with_host(&host, rev, |host| {
-                            if !bind.is_empty() {
-                                host.write(&bind, Json::String(pickup.clone()));
-                                host.act(&tabs_id, "onChange");
-                            }
-                        });
-                        selected.set(pickup.clone());
-                    };
+                    let pick = tab.id.clone();
                     bar = bar.child(choice(
                         attr_str(tab, "label"),
-                        tab.id == current,
+                        tab.id == current.id,
                         !self.closed,
-                        on,
+                        self.on(move |_: Event<PressEventData>| UserInput::Tab(pick.clone())),
                     ));
                 }
-                let body = tabs
-                    .iter()
-                    .find(|t| t.id == current)
-                    .map(|t| self.child((*t).clone()))
-                    .unwrap_or_else(|| rect().into_element());
                 rect()
                     .vertical()
                     .width(Size::fill())
                     .spacing(st.space_medium)
                     .child(bar)
-                    .child(body)
+                    .child(self.child(current.clone()))
                     .into_element()
             }
             HeComponent::Tab => rect()
@@ -390,55 +388,36 @@ impl Component for NodeView {
                 .children(children)
                 .into_element(),
             HeComponent::Dialog => {
-                if !attr_bool(node, "open", true) {
-                    return rect().into_element();
-                }
-                let dismiss = !self.closed
+                let dismissable = !self.closed
                     && node
                         .attrs
                         .get("onDismiss")
                         .is_some_and(|handler| !handler.is_null());
-                let host = host.clone();
-                let dismiss_id = id.clone();
-                rect()
-                    .layer(Layer::Overlay)
-                    .position(Position::new_global().top(0.).left(0.))
-                    .width(Size::window_percent(100.))
-                    .height(Size::window_percent(100.))
-                    .center()
-                    .background(Color::BLACK.with_a(120))
-                    .child(
-                        rect()
-                            .vertical()
-                            .width(Size::px(440.))
-                            .max_width(Size::window_percent(92.))
-                            .padding(st.space_large)
-                            .spacing(st.space_medium)
-                            .corner_radius(st.radius)
-                            .background(colors.surface_secondary)
-                            .maybe(!attr_str(node, "title").is_empty(), |el| {
-                                el.child(txt(
-                                    attr_str(node, "title"),
-                                    18.,
-                                    colors.text_primary,
-                                    FontWeight::BOLD,
-                                ))
+                let mut dismiss = self.on(|()| UserInput::Dismiss);
+                let title = attr_str(node, "title");
+                // Escape and a press outside ask to close; the server decides, by `onDismiss`.
+                Popup::new()
+                    .key(&node.id)
+                    .on_close_request(move |()| {
+                        if dismissable {
+                            dismiss(())
+                        }
+                    })
+                    .maybe(attr_bool(node, "open", true), |popup| {
+                        popup
+                            .maybe(!title.is_empty(), |popup| {
+                                popup.child(PopupTitle::new(title.clone()))
                             })
-                            .children(children)
-                            .maybe(dismiss, |el| {
-                                el.child(
-                                    Button::new()
-                                        .outline()
-                                        .cursor(CursorIcon::Pointer)
-                                        .on_press(move |_| {
-                                            Self::with_host(&host, rev, |host| {
-                                                host.act(&dismiss_id, "onDismiss")
-                                            })
-                                        })
-                                        .child("Close"),
-                                )
-                            }),
-                    )
+                            .child(
+                                PopupContent::new().child(
+                                    rect()
+                                        .vertical()
+                                        .width(Size::fill())
+                                        .spacing(st.space_medium)
+                                        .children(children),
+                                ),
+                            )
+                    })
                     .into_element()
             }
             HeComponent::Text => {
@@ -518,21 +497,19 @@ impl Component for NodeView {
                 .background(colors.border)
                 .into_element(),
             HeComponent::Progress => {
-                let value = node.attrs.get("value").and_then(Json::as_f64).unwrap_or(0.);
+                let fraction = node
+                    .attrs
+                    .get("value")
+                    .and_then(Json::as_f64)
+                    .filter(|_| attr_str(node, "variant") != "spinner");
                 self.skin().progress(ProgressProps {
                     label: Some(attr_str(node, "label")).filter(|label| !label.is_empty()),
-                    fraction: value as f32,
+                    fraction: fraction.map(|f| f as f32),
                     style: st,
                 })
             }
             HeComponent::Button => {
                 let enabled = !self.closed && !attr_bool(node, "disabled", false);
-                let host = host.clone();
-                let button_id = id.clone();
-                let on = move |()| {
-                    Self::with_host(&host, rev, |host| host.act(&button_id, "onPress"));
-                };
-                let label = attr_str(node, "label");
                 let variant = match attr_str(node, "variant").as_str() {
                     "primary" | "success" => ButtonVariant::Primary,
                     "failure" => ButtonVariant::Danger,
@@ -540,199 +517,141 @@ impl Component for NodeView {
                     _ => ButtonVariant::Secondary,
                 };
                 self.skin().button(ButtonProps {
-                    label,
+                    label: attr_str(node, "label"),
                     variant,
                     enabled,
-                    on_press: EventHandler::new(on),
+                    on_press: EventHandler::new(self.on(|()| UserInput::Press)),
                 })
             }
             HeComponent::Input => {
-                let bind = attr_str(node, "bind");
-                let path = (!bind.is_empty()).then_some(bind);
-                let number = attr_str(node, "variant") == "number";
-                let multiline = attr_str(node, "variant") == "multiline";
-                let bound = path.as_deref().and_then(|path| host.borrow().value(path));
-                // A number being typed ("1.", "-", "1e") is not yet the number it will become, so
-                // the raw text stays while it still means the bound value.
-                let value = match bound {
-                    Some(value) => {
-                        let typed = local.read().clone();
-                        if number && typed_number(&typed, &value) {
-                            typed
-                        } else {
-                            json_text(&value)
-                        }
-                    }
-                    None => local.read().clone(),
-                };
-                let enabled = !self.closed && !attr_bool(node, "disabled", false);
-                let input_id = id.clone();
-
-                let h = host.clone();
-                let p = path.clone();
-                let change_id = input_id.clone();
-                let on_change = move |text: String| {
-                    local.set(text.clone());
-                    if let Some(path) = &p {
-                        let value = if number {
-                            number_json(&text)
-                        } else {
-                            Json::String(text)
-                        };
-                        Self::with_host(&h, rev, |host| {
-                            host.write(path, value);
-                            host.act(&change_id, "onChange");
-                        });
-                    } else {
-                        bump(rev);
-                    }
-                };
-                let h = host.clone();
-                let p = path;
-                let submit_id = input_id;
-                let on_submit = move |text: String| {
-                    if let Some(path) = &p {
-                        let value = if number {
-                            number_json(&text)
-                        } else {
-                            Json::String(text)
-                        };
-                        Self::with_host(&h, rev, |host| {
-                            host.write(path, value);
-                            host.act(&submit_id, "onSubmit");
-                        });
-                    }
-                };
+                let variant = attr_str(node, "variant");
+                let value = self.controls.borrow().text(&*self.host.borrow(), node);
+                let field = self.skin().input(InputProps {
+                    value,
+                    placeholder: attr_str(node, "placeholder"),
+                    multiline: variant == "multiline",
+                    password: variant == "password",
+                    enabled: !self.closed && !attr_bool(node, "disabled", false),
+                    on_change: EventHandler::new(self.on(UserInput::Text)),
+                    on_commit: EventHandler::new(self.on(|()| UserInput::Commit)),
+                    on_submit: EventHandler::new(self.on(|_: String| UserInput::Submit)),
+                });
+                // keyed: its editor and focus stay its own as others come and go
                 labeled(
                     node,
-                    self.skin().input(InputProps {
-                        value,
-                        placeholder: attr_str(node, "placeholder"),
-                        multiline,
-                        enabled,
-                        on_change: EventHandler::new(on_change),
-                        on_submit: EventHandler::new(on_submit),
-                    }),
+                    rect().key(&node.id).width(Size::fill()).child(field).into(),
                 )
             }
             HeComponent::Checkbox => {
-                let bind = attr_str(node, "bind");
-                let value = host
-                    .borrow()
-                    .value(&bind)
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let label = attr_str(node, "label");
-                let enabled = !self.closed && !attr_bool(node, "disabled", false);
-                let host = host.clone();
-                let box_id = id.clone();
-                let on = move |()| {
-                    if !bind.is_empty() {
-                        Self::with_host(&host, rev, |host| {
-                            host.write(&bind, Json::Bool(!value));
-                            host.act(&box_id, "onChange");
-                        });
-                    }
-                };
+                let checked = self.value().and_then(|v| v.as_bool()).unwrap_or(false);
                 self.skin().checkbox(CheckboxProps {
-                    label,
-                    checked: value,
-                    enabled,
-                    on_toggle: EventHandler::new(on),
+                    label: attr_str(node, "label"),
+                    checked,
+                    switch: attr_str(node, "variant") == "switch",
+                    enabled: !self.closed && !attr_bool(node, "disabled", false),
+                    on_toggle: EventHandler::new(self.on(move |()| UserInput::Checked(!checked))),
                     style: st,
                 })
             }
             HeComponent::Select => {
-                let bind = attr_str(node, "bind");
                 let options = select_options(node);
-                let current = host
-                    .borrow()
-                    .value(&bind)
+                let current = self
+                    .value()
                     .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_default();
-                let control: Element = if attr_str(node, "variant") == "dropdown" {
-                    let shown = options
-                        .iter()
-                        .find(|(value, _)| *value == current)
-                        .map(|(_, label)| label.clone())
-                        .unwrap_or_default();
-                    Select::new()
-                        .selected_item(txt(shown, 15., colors.text_primary, FontWeight::NORMAL))
-                        .children(options.into_iter().map(|(value, label)| {
-                            let host = host.clone();
-                            let bind = bind.clone();
-                            let select_id = id.clone();
-                            MenuItem::new()
-                                .on_press(move |_| {
-                                    Self::with_host(&host, rev, |host| {
-                                        host.write(&bind, Json::String(value.clone()));
-                                        host.act(&select_id, "onChange");
-                                    });
-                                })
-                                .child(txt(label, 15., colors.text_primary, FontWeight::NORMAL))
+                    .filter(|value| options.iter().any(|(v, _)| v == value));
+                let is = |value: &str| current.as_deref() == Some(value);
+                let enabled = !self.closed && !attr_bool(node, "disabled", false);
+                let pick = |value: &str| {
+                    let value = value.to_owned();
+                    self.on(move |_: Event<PressEventData>| UserInput::Select(value.clone()))
+                };
+                let control: Element = match attr_str(node, "variant").as_str() {
+                    "radio" => rect()
+                        .vertical()
+                        .width(Size::fill())
+                        .spacing(st.space_small)
+                        .children(options.iter().map(|(value, label)| {
+                            radio_row(label.clone(), is(value), enabled, pick(value))
+                        }))
+                        .into_element(),
+                    "segmented" => SegmentedButton::new()
+                        .children(options.iter().map(|(value, label)| {
+                            ButtonSegment::new()
+                                .key(value)
+                                .selected(is(value))
+                                .enabled(enabled)
+                                .cursor(CursorIcon::Pointer)
+                                .on_press(pick(value))
+                                .child(label.clone())
                                 .into_element()
                         }))
-                        .into_element()
-                } else {
-                    let mut row = rect()
-                        .horizontal()
-                        .width(Size::fill())
-                        .content(Content::wrap_spacing(st.space_small))
-                        .spacing(st.space_small);
-                    for (value, label) in options {
-                        let is_current = value == current;
-                        let host = host.clone();
-                        let bind = bind.clone();
-                        let select_id = id.clone();
-                        row = row.child(choice(label, is_current, !self.closed, move |_| {
-                            Self::with_host(&host, rev, |host| {
-                                host.write(&bind, Json::String(value.clone()));
-                                host.act(&select_id, "onChange");
-                            });
-                        }));
+                        .into_element(),
+                    _ => {
+                        let shown = options
+                            .iter()
+                            .find(|(value, _)| is(value))
+                            .map_or("Choose…".to_string(), |(_, label)| label.clone());
+                        if enabled {
+                            Select::new()
+                                .selected_item(txt(
+                                    shown,
+                                    15.,
+                                    colors.text_primary,
+                                    FontWeight::NORMAL,
+                                ))
+                                .children(options.iter().map(|(value, label)| {
+                                    MenuItem::new()
+                                        .selected(is(value))
+                                        .on_press(pick(value))
+                                        .child(txt(
+                                            label.clone(),
+                                            15.,
+                                            colors.text_primary,
+                                            FontWeight::NORMAL,
+                                        ))
+                                        .into_element()
+                                }))
+                                .into_element()
+                        } else {
+                            Button::new()
+                                .outline()
+                                .enabled(false)
+                                .child(shown)
+                                .into_element()
+                        }
                     }
-                    row.into_element()
                 };
                 labeled(node, control)
             }
             HeComponent::Slider => {
-                let bind = attr_str(node, "bind");
                 let min = attr_num(node, "min").unwrap_or(0.);
-                let max = attr_num(node, "max").unwrap_or(100.);
+                let max = attr_num(node, "max").unwrap_or(100.).max(min);
                 let step = attr_num(node, "step").unwrap_or(1.);
-                let value = host
-                    .borrow()
-                    .value(&bind)
+                let value = self
+                    .value()
                     .and_then(|v| v.as_f64())
-                    .unwrap_or(min);
+                    .unwrap_or(min)
+                    .clamp(min, max);
                 let percent = if max > min {
-                    ((value - min) / (max - min) * 100.).clamp(0., 100.)
+                    (value - min) / (max - min) * 100.
                 } else {
                     0.
                 };
-                let enabled = !self.closed && !attr_bool(node, "disabled", false);
-                let host = host.clone();
-                let slider_id = id.clone();
-                let step_percent = if max > min {
-                    step / (max - min) * 100.
-                } else {
-                    1.
-                };
-                let control = Slider::new(move |v: f64| {
-                    let actual = min + (max - min) * v / 100.;
-                    Self::with_host(&host, rev, |host| {
-                        host.write(&bind, json!(actual));
-                        host.act(&slider_id, "onChange");
-                    });
-                })
+                let control = Slider::new(self.on(move |percent: f64| {
+                    UserInput::Slide(slider_value(percent, min, max, step))
+                }))
                 .value(percent)
-                .enabled(enabled)
-                .step(step_percent)
+                .enabled(!self.closed && !attr_bool(node, "disabled", false))
                 .size(Size::fill())
                 .into_element();
                 labeled(node, control)
             }
         }
+    }
+
+    fn render_key(&self) -> DiffKey {
+        // its state (a field's focus) stays its own as siblings come and go
+        DiffKey::from(&self.node.id)
     }
 }
 
@@ -764,6 +683,31 @@ fn choice(
     } else {
         button.outline().child(text).into_element()
     }
+}
+
+/// One option of a set of which one is chosen, all of the row pressable.
+fn radio_row(
+    text: String,
+    selected: bool,
+    enabled: bool,
+    on: impl FnMut(Event<PressEventData>) + 'static,
+) -> Element {
+    let colors = palette();
+    rect()
+        .horizontal()
+        .spacing(10.)
+        .cross_align(Alignment::Center)
+        .maybe(!enabled, |el| el.opacity(0.45))
+        .a11y_role(AccessibilityRole::RadioButton)
+        .a11y_focusable(enabled)
+        .maybe(enabled, |el| el.on_press(on))
+        .child(RadioItem::new().selected(selected))
+        .child(txt(text, 15., colors.text_primary, FontWeight::NORMAL))
+        .into_element()
+}
+
+fn visible(node: &ResolvedTree) -> bool {
+    attr_bool(node, "visible", true)
 }
 
 /// Whether a child of a row takes the row's spare width instead of its own size.
@@ -896,33 +840,4 @@ fn select_options(node: &ResolvedTree) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// What a number input holds for the text typed in it: a number, or null when it is not one.
-fn number_json(text: &str) -> Json {
-    match text.trim().parse::<f64>() {
-        Ok(n) if n.is_finite() => match text.trim().parse::<i64>() {
-            Ok(i) => json!(i),
-            Err(_) => json!(n),
-        },
-        _ => Json::Null,
-    }
-}
-
-/// Whether `typed` is still a way of writing the bound `value`.
-fn typed_number(typed: &str, value: &Json) -> bool {
-    match (number_json(typed).as_f64(), value.as_f64()) {
-        (Some(typed), Some(value)) => typed == value,
-        (None, None) => number_json(typed).is_null() && value.is_null(),
-        _ => false,
-    }
-}
-
-fn json_text(value: &Json) -> String {
-    match value {
-        Json::String(s) => s.clone(),
-        Json::Number(n) => n.to_string(),
-        Json::Bool(b) => b.to_string(),
-        _ => String::new(),
-    }
 }

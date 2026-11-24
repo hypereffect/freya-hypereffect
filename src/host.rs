@@ -48,6 +48,7 @@ pub struct ClientHost {
     client: Client,
     send: Box<dyn FnMut(String)>,
     open: Box<dyn FnMut(String)>,
+    diagnostic: Box<dyn FnMut(String)>,
     error: Option<String>,
 }
 
@@ -69,6 +70,7 @@ impl ClientHost {
             client,
             send: Box::new(send),
             open: Box::new(|_| {}),
+            diagnostic: Box::new(|diagnostic| eprintln!("hypereffect: {diagnostic}")),
             error: None,
         }
     }
@@ -77,6 +79,14 @@ impl ClientHost {
     /// owns that decision (a server must not be able to start a payment this way).
     pub fn on_open(mut self, open: impl FnMut(String) + 'static) -> Self {
         self.open = Box::new(open);
+        self
+    }
+
+    /// Decide where the server's mistakes go (a message it could not apply, an expression that
+    /// failed). They are for whoever wrote the server, not the user: by default they are
+    /// printed to stderr.
+    pub fn on_diagnostic(mut self, diagnostic: impl FnMut(String) + 'static) -> Self {
+        self.diagnostic = Box::new(diagnostic);
         self
     }
 
@@ -101,8 +111,10 @@ impl ClientHost {
         for url in self.client.take_opens() {
             (self.open)(url);
         }
-        // Diagnostics are the server's mistakes: not for the user.
-        let _ = self.client.take_diagnostics();
+        // the server's mistakes: for its developer, not on screen
+        for diagnostic in self.client.take_diagnostics() {
+            (self.diagnostic)(diagnostic);
+        }
         if let Some(close) = self.client.closed() {
             let reason = match close.reason.as_deref() {
                 Some(reason) => format!("Disconnected: {reason}"),
@@ -168,6 +180,15 @@ mod tests {
         };
         assert_eq!(body["room"], json!("abc"));
         assert_eq!(body["n"], json!(1));
+    }
+
+    #[test]
+    fn diagnostics_are_reported() {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let log = seen.clone();
+        let mut host = ClientHost::new(|_| {}).on_diagnostic(move |d| log.borrow_mut().push(d));
+        host.receive(b"element {\"id\":\"x\",\"type\":\"nonsense\"}\n");
+        assert!(!seen.borrow().is_empty());
     }
 
     #[test]
