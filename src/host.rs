@@ -1,9 +1,10 @@
 use std::{cell::RefCell, rc::Rc};
 
 use hypereffect::{
-    Value as Json,
+    Map, Value as Json,
     client::{Client, ResolvedTree},
 };
+use serde::Serialize;
 
 /// What a [`HyperView`](crate::HyperView) draws and talks to.
 pub trait HyperHost {
@@ -27,6 +28,12 @@ pub trait HyperHost {
         0
     }
 
+    /// Whether the session is over: the view keeps the last tree on screen, but the user cannot
+    /// act on it. Hosts that never end a session can leave it at `false`.
+    fn is_closed(&self) -> bool {
+        false
+    }
+
     /// What went wrong, to show above the interface.
     fn error(&self) -> Option<String> {
         None
@@ -47,16 +54,17 @@ pub struct ClientHost {
 impl ClientHost {
     /// `send` writes a line to the server. It is called with the `hello` first.
     pub fn new(send: impl FnMut(String) + 'static) -> Self {
-        Self::with_hello(send, &Default::default())
+        Self::with_hello(send, &Map::new())
     }
 
-    /// Like [`ClientHost::new`], with the parameters of the session in the `hello`.
-    pub fn with_hello(
+    /// Like [`ClientHost::new`], with `hello` as the object of the `hello` line. Its members
+    /// mean nothing to hypereffect: the protocol on top of it gives them their meaning.
+    pub fn with_hello<T: Serialize + ?Sized>(
         mut send: impl FnMut(String) + 'static,
-        params: &std::collections::BTreeMap<String, String>,
+        hello: &T,
     ) -> Self {
         let mut client = Client::new();
-        send(client.hello_with(params));
+        send(client.hello_with(hello));
         Self {
             client,
             send: Box::new(send),
@@ -95,6 +103,13 @@ impl ClientHost {
         }
         // Diagnostics are the server's mistakes: not for the user.
         let _ = self.client.take_diagnostics();
+        if let Some(close) = self.client.closed() {
+            let reason = match close.reason.as_deref() {
+                Some(reason) => format!("Disconnected: {reason}"),
+                None => "Disconnected. The server closed the connection.".to_string(),
+            };
+            self.error = Some(reason);
+        }
     }
 }
 
@@ -108,17 +123,66 @@ impl HyperHost for ClientHost {
     }
 
     fn write(&mut self, path: &str, value: Json) {
-        self.client.write(path, value);
+        if self.client.is_connected() {
+            self.client.write(path, value);
+        }
     }
 
     fn act(&mut self, id: &str, event: &str) {
-        if let Some(line) = self.client.trigger(id, event) {
+        if self.client.is_connected()
+            && let Some(line) = self.client.trigger(id, event)
+        {
             (self.send)(line);
         }
         self.report();
     }
 
+    fn is_closed(&self) -> bool {
+        !self.client.is_connected()
+    }
+
     fn error(&self) -> Option<String> {
         self.error.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hypereffect::{RendererMessage, json};
+
+    use super::*;
+
+    #[test]
+    fn hello_carries_an_object() {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let log = sent.clone();
+        let _host = ClientHost::with_hello(
+            move |line| log.borrow_mut().push(line),
+            &json!({"room": "abc", "n": 1}),
+        );
+
+        let sent = sent.borrow();
+        assert_eq!(sent.len(), 1);
+        let Ok(RendererMessage::Hello(body)) = RendererMessage::parse(sent[0].trim_end()) else {
+            panic!("not a hello");
+        };
+        assert_eq!(body["room"], json!("abc"));
+        assert_eq!(body["n"], json!(1));
+    }
+
+    #[test]
+    fn server_close_is_reported_and_stops_writes() {
+        let mut host = ClientHost::new(|_| {});
+        host.receive(b"signal {\"count\":1}\n");
+        host.receive(b"close {\"reason\":\"session_not_found\"}\n");
+
+        assert!(host.is_closed());
+        assert_eq!(
+            host.error().as_deref(),
+            Some("Disconnected: session_not_found")
+        );
+
+        host.write("count", json!(2));
+        assert_eq!(host.value("count"), Some(json!(1)));
     }
 }

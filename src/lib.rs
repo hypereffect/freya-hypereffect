@@ -14,6 +14,10 @@
 //! HyperView::new(host, rev)
 //! ```
 //!
+//! The `hello` carries an object the protocol on top of hypereffect defines
+//! ([`ClientHost::with_hello`]). When the server ends the session, the last tree stays on screen
+//! but the user cannot act on it.
+//!
 //! Freya redraws a component when state it read changes, and the host is not state, so a
 //! [`HyperView`] takes a `rev` counter: bump it whenever the host changes from outside (a message
 //! arrived). The renderer bumps it itself after the user acts.

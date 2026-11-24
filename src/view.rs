@@ -132,9 +132,9 @@ impl PartialEq for HyperView {
 impl Component for HyperView {
     fn render(&self) -> impl IntoElement {
         let _ = self.rev.read();
-        let (tree, error) = {
+        let (tree, error, closed) = {
             let host = self.host.borrow();
-            (host.tree(), host.error())
+            (host.tree(), host.error(), host.is_closed())
         };
         let colors = palette();
         let host = self.host.clone();
@@ -166,6 +166,7 @@ impl Component for HyperView {
                     style,
                     skin: self.skin.clone(),
                     revision,
+                    closed,
                 }
                 .into_element()
             }))
@@ -181,6 +182,7 @@ struct NodeView {
     style: Style,
     skin: Option<SharedSkin>,
     revision: u64,
+    closed: bool,
 }
 
 impl PartialEq for NodeView {
@@ -192,6 +194,7 @@ impl PartialEq for NodeView {
             && self.style == other.style
             && same_skin(&self.skin, &other.skin)
             && self.revision == other.revision
+            && self.closed == other.closed
     }
 }
 
@@ -212,6 +215,7 @@ impl NodeView {
             style: self.style,
             skin: self.skin.clone(),
             revision: self.revision,
+            closed: self.closed,
         }
         .into_element()
     }
@@ -359,7 +363,12 @@ impl Component for NodeView {
                         });
                         selected.set(pickup.clone());
                     };
-                    bar = bar.child(choice(attr_str(tab, "label"), tab.id == current, true, on));
+                    bar = bar.child(choice(
+                        attr_str(tab, "label"),
+                        tab.id == current,
+                        !self.closed,
+                        on,
+                    ));
                 }
                 let body = tabs
                     .iter()
@@ -384,10 +393,11 @@ impl Component for NodeView {
                 if !attr_bool(node, "open", true) {
                     return rect().into_element();
                 }
-                let dismiss = node
-                    .attrs
-                    .get("onDismiss")
-                    .is_some_and(|handler| !handler.is_null());
+                let dismiss = !self.closed
+                    && node
+                        .attrs
+                        .get("onDismiss")
+                        .is_some_and(|handler| !handler.is_null());
                 let host = host.clone();
                 let dismiss_id = id.clone();
                 rect()
@@ -516,7 +526,7 @@ impl Component for NodeView {
                 })
             }
             HeComponent::Button => {
-                let enabled = !attr_bool(node, "disabled", false);
+                let enabled = !self.closed && !attr_bool(node, "disabled", false);
                 let host = host.clone();
                 let button_id = id.clone();
                 let on = move |()| {
@@ -555,7 +565,7 @@ impl Component for NodeView {
                     }
                     None => local.read().clone(),
                 };
-                let enabled = !attr_bool(node, "disabled", false);
+                let enabled = !self.closed && !attr_bool(node, "disabled", false);
                 let input_id = id.clone();
 
                 let h = host.clone();
@@ -613,7 +623,7 @@ impl Component for NodeView {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let label = attr_str(node, "label");
-                let enabled = !attr_bool(node, "disabled", false);
+                let enabled = !self.closed && !attr_bool(node, "disabled", false);
                 let host = host.clone();
                 let box_id = id.clone();
                 let on = move |()| {
@@ -674,7 +684,7 @@ impl Component for NodeView {
                         let host = host.clone();
                         let bind = bind.clone();
                         let select_id = id.clone();
-                        row = row.child(choice(label, is_current, true, move |_| {
+                        row = row.child(choice(label, is_current, !self.closed, move |_| {
                             Self::with_host(&host, rev, |host| {
                                 host.write(&bind, Json::String(value.clone()));
                                 host.act(&select_id, "onChange");
@@ -700,7 +710,7 @@ impl Component for NodeView {
                 } else {
                     0.
                 };
-                let enabled = !attr_bool(node, "disabled", false);
+                let enabled = !self.closed && !attr_bool(node, "disabled", false);
                 let host = host.clone();
                 let slider_id = id.clone();
                 let step_percent = if max > min {

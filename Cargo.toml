@@ -1,6 +1,6 @@
 [package]
 name = "freya-hypereffect"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "A Freya renderer for hypereffect, drawn with Freya's own components and theme."
 license = "MIT"
@@ -12,6 +12,7 @@ categories = ["gui"]
 
 [dependencies]
 freya = "0.6.0-alpha"
-hypereffect = "0.6.3"
+hypereffect = "0.7.0"
+serde = "1"
 base64 = "0.22"
 bytes = "1"

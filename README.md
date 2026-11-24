@@ -1,8 +1,8 @@
 # freya-hypereffect
 
-A [Freya](https://freyaui.dev) renderer for [hypereffect](https://hypereffect.dev). The [`Client`](https://docs.rs/hypereffect/0.6.3/hypereffect/client/struct.Client.html) of the hypereffect crate keeps the element tree, signals and CEL; this crate draws the resolved tree with Freya's own components, in the colors of the app's Freya theme, and sends the user's actions back.
+A [Freya](https://freyaui.dev) renderer for [hypereffect](https://hypereffect.dev). The [`Client`](https://docs.rs/hypereffect/0.7.0/hypereffect/client/struct.Client.html) of the hypereffect crate keeps the element tree, signals and CEL; this crate draws the resolved tree with Freya's own components, in the colors of the app's Freya theme, and sends the user's actions back.
 
-Built against hypereffect `0.6.3` from crates.io.
+Built against hypereffect `0.7.0` from crates.io.
 
 ```rust
 let host = Rc::new(RefCell::new(ClientHost::new(|line| send_to_server(line))));
@@ -16,3 +16,4 @@ HyperView::new(host.clone(), rev)
 - `HyperHost` is what the view draws: a tree, signals, a way to act. `ClientHost` is the ready-made one over a `Client` and a function that writes lines to the server; implement the trait to drive something else (a WebAssembly app in-process).
 - Images: only `data:` URIs by default (`ImagePolicy`). A server does not get to make the app fetch URLs or read files.
 - Buttons that ask to open a URL do nothing unless the host decides what to do with them (`ClientHost::on_open`).
+- A server ending the session (`close`) leaves the last interface on screen, with its reason above it, and the user can no longer act on it.
