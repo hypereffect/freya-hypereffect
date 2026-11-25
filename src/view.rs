@@ -464,8 +464,9 @@ impl Component for NodeView {
             HeComponent::Image => {
                 let alt = attr_str(node, "alt");
                 let src = attr_str(node, "src");
+                let variant = attr_str(node, "variant");
                 if let Some(bytes) = image_bytes(&src, self.images) {
-                    let (width, height) = match attr_str(node, "variant").as_str() {
+                    let (width, height) = match variant.as_str() {
                         "avatar" => (Size::px(48.), Size::px(48.)),
                         "thumbnail" => (Size::px(120.), Size::px(120.)),
                         "full" => (Size::fill(), Size::px(300.)),
@@ -476,9 +477,15 @@ impl Component for NodeView {
                         .height(height)
                         .into_element();
                 }
+                // As wide as the image would be: a small one keeps its place in a row.
+                let (width, height) = match variant.as_str() {
+                    "avatar" => (Size::px(48.), Size::px(48.)),
+                    "thumbnail" => (Size::px(120.), Size::px(120.)),
+                    _ => (Size::fill(), Size::px(120.)),
+                };
                 rect()
-                    .width(Size::fill())
-                    .height(Size::px(120.))
+                    .width(width)
+                    .height(height)
                     .corner_radius(st.radius)
                     .background(colors.surface_tertiary)
                     .center()
@@ -710,21 +717,31 @@ fn visible(node: &ResolvedTree) -> bool {
     attr_bool(node, "visible", true)
 }
 
-/// Whether a child of a row takes the row's spare width instead of its own size.
+/// Whether a child of a row takes the row's spare width instead of its own size. Everything
+/// drawn as wide as its parent does: placed as it is, it would take the whole row and push what
+/// follows it out.
 fn grows_in_row(node: &ResolvedTree) -> bool {
     attr_bool(node, "visible", true)
-        && matches!(
-            node.component,
+        && match node.component {
             HeComponent::Text
-                | HeComponent::Input
-                | HeComponent::Select
-                | HeComponent::Slider
-                | HeComponent::Progress
-                | HeComponent::Checkbox
-                | HeComponent::Column
-                | HeComponent::Card
-                | HeComponent::List
-        )
+            | HeComponent::Input
+            | HeComponent::Select
+            | HeComponent::Slider
+            | HeComponent::Progress
+            | HeComponent::Checkbox
+            | HeComponent::Column
+            | HeComponent::Row
+            | HeComponent::Card
+            | HeComponent::List
+            | HeComponent::Tabs
+            | HeComponent::Tab
+            | HeComponent::Notice
+            | HeComponent::Divider => true,
+            HeComponent::Image => {
+                !matches!(attr_str(node, "variant").as_str(), "avatar" | "thumbnail")
+            }
+            HeComponent::Badge | HeComponent::Button | HeComponent::Dialog => false,
+        }
 }
 
 /// The bytes of an image the policy lets through.
