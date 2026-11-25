@@ -21,7 +21,7 @@ HyperView::new(host.clone(), rev)
 
 ## Debugging: seeing a page without a window
 
-`examples/snapshot.rs` draws a recorded flow to a PNG, headless, at the size you give it. Record the state you want with [`copcat`](https://crates.io/crates/copcat) (the first page with `copcat stream`, or after a press with `--record`), then draw it:
+`examples/snapshot.rs` draws a recorded flow to a PNG, headless, at the size you give it. Record the state you want with [`copcat`](https://github.com/cassiscash/copcat) (the first page with `copcat stream`, or after a press with `--record`), then draw it:
 
 ```sh
 copcat press <uri> add --record flow.txt
