@@ -14,7 +14,7 @@ HyperView::new(host.clone(), rev)
 ```
 
 - `HyperHost` is what the view draws: a tree, signals, a way to act. `ClientHost` is the ready-made one over a `Client` and a function that writes lines to the server; implement the trait to drive something else (a WebAssembly app in-process).
-- Images: only `data:` URIs by default (`ImagePolicy`). A server does not get to make the app fetch URLs or read files.
+- Images: `data:` URIs and remote `http(s)` URLs by default (`ImagePolicy`); files of the device (`file://`, absolute paths) are off unless enabled. Restrict further with `ImagePolicy::inline()` or `ImagePolicy::none()`. SVG images are drawn too, inline or remote.
 - Buttons that ask to open a URL do nothing unless the host decides what to do with them (`ClientHost::on_open`).
 - A server ending the session (`close`) leaves the last interface on screen, with its reason above it, and the user can no longer act on it.
 - The server's mistakes (`diagnostics`: a message it could not apply, an expression that failed) are printed to stderr, never shown in the interface; `ClientHost::on_diagnostic` sends them elsewhere.

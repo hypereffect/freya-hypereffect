@@ -2,6 +2,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use base64::Engine;
 use freya::prelude::*;
+use freya_components::http::fetch;
 use hypereffect::{Component as HeComponent, Value as Json, client::ResolvedTree};
 
 use crate::{
@@ -39,21 +40,44 @@ impl Default for Style {
 }
 
 /// Which images a server may make the renderer show.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImagePolicy {
     /// Images written into the page itself (`data:` URIs), which fetch nothing. On by default.
     pub inline: bool,
     /// Files of this device (`file://` and absolute paths). Off by default: a server that does
     /// not own the device has no business naming its files.
     pub files: bool,
+    /// Images fetched from `http:` and `https:` URLs. On by default.
+    pub remote: bool,
+}
+
+impl Default for ImagePolicy {
+    /// Inline and remote images, not files of the device.
+    fn default() -> Self {
+        Self {
+            inline: true,
+            files: false,
+            remote: true,
+        }
+    }
 }
 
 impl ImagePolicy {
+    /// Every source: inline, files and remote images.
+    pub const fn all() -> Self {
+        Self {
+            inline: true,
+            files: true,
+            remote: true,
+        }
+    }
+
     /// Inline images only.
     pub const fn inline() -> Self {
         Self {
             inline: true,
             files: false,
+            remote: false,
         }
     }
 
@@ -62,6 +86,7 @@ impl ImagePolicy {
         Self {
             inline: false,
             files: false,
+            remote: false,
         }
     }
 }
@@ -87,7 +112,7 @@ impl HyperView {
         Self {
             host,
             rev,
-            images: ImagePolicy::inline(),
+            images: ImagePolicy::default(),
             style: Style::default(),
             skin: None,
             revision,
@@ -487,7 +512,7 @@ impl Component for NodeView {
                 let alt = attr_str(node, "alt");
                 let src = attr_str(node, "src");
                 let variant = attr_str(node, "variant");
-                if let Some(bytes) = image_bytes(&src, self.images) {
+                if let Some(media) = media_source(&src, self.images) {
                     let (width, height) = match variant.as_str() {
                         "avatar" => (Size::px(48.), Size::px(48.)),
                         "thumbnail" => (Size::px(120.), Size::px(120.)),
@@ -495,10 +520,47 @@ impl Component for NodeView {
                         "full" => (Size::fill(), Size::auto()),
                         _ => (Size::fill(), Size::px(160.)),
                     };
-                    return ImageViewer::new((src, bytes::Bytes::from(bytes)))
-                        .width(width)
-                        .height(height)
+                    if media.svg {
+                        return SvgPicture {
+                            source: media.source,
+                            width,
+                            height,
+                            radius: st.radius,
+                            alt,
+                            full: variant == "full",
+                        }
                         .into_element();
+                    }
+                    let viewer = match media.source {
+                        PictureSource::Bytes(bytes) => {
+                            let fallback =
+                                image_placeholder(&alt, st.radius, width.clone(), height.clone());
+                            ImageViewer::new((src, bytes))
+                                .width(width)
+                                .height(height)
+                                .error_renderer(move |_| fallback.clone())
+                                .into_element()
+                        }
+                        PictureSource::Url(url) => {
+                            // A URL may serve an SVG without saying so in its path. If it is not
+                            // a raster image, let the SVG viewer try the same source.
+                            let fallback = SvgPicture {
+                                source: PictureSource::Url(url.clone()),
+                                width: width.clone(),
+                                height: height.clone(),
+                                radius: st.radius,
+                                alt,
+                                full: variant == "full",
+                            }
+                            .into_element();
+                            ImageViewer::new(url)
+                                .width(width)
+                                .height(height)
+                                .error_renderer(move |_| fallback.clone())
+                                .into_element()
+                        }
+                    };
+                    return viewer;
                 }
                 // As wide as the image would be: a small one keeps its place in a row.
                 let (width, height) = match variant.as_str() {
@@ -506,20 +568,7 @@ impl Component for NodeView {
                     "thumbnail" => (Size::px(120.), Size::px(120.)),
                     _ => (Size::fill(), Size::px(120.)),
                 };
-                rect()
-                    .width(width)
-                    .height(height)
-                    .corner_radius(st.radius)
-                    .background(colors.surface_tertiary)
-                    .center()
-                    .child(txt(
-                        // A remote source is shown as what it is called, never fetched.
-                        alt,
-                        13.,
-                        colors.text_secondary,
-                        FontWeight::NORMAL,
-                    ))
-                    .into_element()
+                image_placeholder(&alt, st.radius, width, height)
             }
             HeComponent::Divider => rect()
                 .width(Size::fill())
@@ -784,23 +833,286 @@ fn wrap_share(children: usize, gap: f32) -> Size {
     )
 }
 
-/// The bytes of an image the policy lets through.
-fn image_bytes(src: &str, policy: ImagePolicy) -> Option<Vec<u8>> {
+/// Where the renderer gets the bytes of a picture.
+#[derive(Clone, PartialEq)]
+enum PictureSource {
+    Bytes(Bytes),
+    Url(Url),
+}
+
+/// A picture the policy lets through.
+struct Media {
+    source: PictureSource,
+    svg: bool,
+}
+
+/// The picture at `src`, if [`ImagePolicy`] lets it through.
+fn media_source(src: &str, policy: ImagePolicy) -> Option<Media> {
     if let Some(rest) = src.strip_prefix("data:") {
         if !policy.inline {
             return None;
         }
         let (meta, data) = rest.split_once(',')?;
-        if !meta.ends_with(";base64") {
-            return None;
-        }
-        return base64::engine::general_purpose::STANDARD.decode(data).ok();
+        let meta = meta.to_ascii_lowercase();
+        let mime = meta.split(';').next().unwrap_or("");
+        let bytes = if meta.ends_with(";base64") {
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .ok()?
+        } else {
+            percent_decode(data)
+        };
+        return Some(Media {
+            source: PictureSource::Bytes(Bytes::from(bytes)),
+            svg: mime == "image/svg+xml",
+        });
     }
-    let path = src.strip_prefix("file://").unwrap_or(src);
-    if policy.files && path.starts_with('/') {
-        return std::fs::read(path).ok();
+
+    if let Ok(url) = Url::parse(src) {
+        match url.scheme() {
+            "http" | "https" => {
+                if !policy.remote {
+                    return None;
+                }
+                return Some(Media {
+                    svg: url.path().to_ascii_lowercase().ends_with(".svg"),
+                    source: PictureSource::Url(url),
+                });
+            }
+            "file" => {
+                if !policy.files {
+                    return None;
+                }
+                return read_picture(url.to_file_path().ok()?);
+            }
+            _ => {}
+        }
+    }
+
+    if policy.files && src.starts_with('/') {
+        return read_picture(src.into());
     }
     None
+}
+
+/// A picture read from a file of this device.
+fn read_picture(path: std::path::PathBuf) -> Option<Media> {
+    let bytes = std::fs::read(&path).ok()?;
+    Some(Media {
+        svg: path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+            || looks_like_svg(&bytes),
+        source: PictureSource::Bytes(Bytes::from(bytes)),
+    })
+}
+
+/// Whether the start of `bytes` is an SVG document.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1024)];
+    String::from_utf8_lossy(head)
+        .to_ascii_lowercase()
+        .contains("<svg")
+}
+
+/// Decode the `%XX` escapes of a data URI that is not base64.
+fn percent_decode(data: &str) -> Vec<u8> {
+    let bytes = data.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+        {
+            out.push(high * 16 + low);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    out
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// The width/height ratio an SVG declares for itself.
+fn svg_ratio(bytes: &[u8]) -> Option<f32> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let start = text.find("<svg")?;
+    let end = start + text[start..].find('>')?;
+    let tag = &text[start..end];
+    let width = svg_attr(tag, "width").and_then(svg_length);
+    let height = svg_attr(tag, "height").and_then(svg_length);
+    if let (Some(width), Some(height)) = (width, height) {
+        return Some(width / height);
+    }
+    let mut view_box = svg_attr(tag, "viewBox")?
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|part| !part.is_empty());
+    view_box.next()?;
+    view_box.next()?;
+    let width: f32 = view_box.next()?.parse().ok()?;
+    let height: f32 = view_box.next()?.parse().ok()?;
+    (width > 0. && height > 0.).then_some(width / height)
+}
+
+/// An SVG length attribute in pixels (or unitless), the units an intrinsic size can use.
+fn svg_length(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let number = value.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%');
+    let unit = &value[number.len()..];
+    if !unit.is_empty() && !unit.eq_ignore_ascii_case("px") {
+        return None;
+    }
+    number.parse().ok().filter(|number| *number > 0.)
+}
+
+/// The raw value of `name` in an SVG tag such as `<svg width="10" viewBox="...">`.
+fn svg_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let mut rest = tag;
+    while let Some(index) = rest.find(name) {
+        let before = &rest[..index];
+        let after = &rest[index + name.len()..];
+        if before.ends_with(|c: char| c.is_whitespace())
+            && let Some(after) = after.trim_start().strip_prefix('=')
+        {
+            let after = after.trim_start();
+            if let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                let value = &after[quote.len_utf8()..];
+                if let Some(end) = value.find(quote) {
+                    return Some(&value[..end]);
+                }
+            }
+        }
+        rest = after;
+    }
+    None
+}
+
+/// What an image that cannot be shown leaves: its alt text, in its place.
+fn image_placeholder(alt: &str, radius: f32, width: Size, height: Size) -> Element {
+    let colors = palette();
+    rect()
+        .width(width)
+        .height(height)
+        .corner_radius(radius)
+        .background(colors.surface_tertiary)
+        .center()
+        .child(txt(alt, 13., colors.text_secondary, FontWeight::NORMAL))
+        .into_element()
+}
+
+/// An SVG, drawn with [`SvgViewer`]. Remote bytes are fetched here, because a `full` SVG needs
+/// its own aspect ratio to make a height, and a raster viewer with an auto height never gets one.
+#[derive(Clone, PartialEq)]
+struct SvgPicture {
+    source: PictureSource,
+    width: Size,
+    height: Size,
+    radius: f32,
+    alt: String,
+    full: bool,
+}
+
+impl Component for SvgPicture {
+    fn render(&self) -> impl IntoElement {
+        let loaded = use_state::<Option<(String, Result<Bytes, String>)>>(|| None);
+        let remote = match &self.source {
+            PictureSource::Url(url) => Some(url.clone()),
+            PictureSource::Bytes(_) => None,
+        };
+        let needs_fetch = match (&remote, loaded.peek().as_ref()) {
+            (Some(url), Some((cached, _))) => cached.as_str() != url.as_str(),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        use_side_effect_with_deps(
+            &(remote.clone(), needs_fetch),
+            move |(remote, needs_fetch)| {
+                if *needs_fetch && let Some(url) = remote {
+                    let mut loaded = loaded;
+                    let url = (*url).clone();
+                    spawn_in_window(async move {
+                        let result = fetch(url.clone()).await.map_err(|err| err.to_string());
+                        loaded.set(Some((url.to_string(), result)));
+                    });
+                }
+            },
+        );
+
+        let bytes = match &self.source {
+            PictureSource::Bytes(bytes) => Some(bytes.clone()),
+            PictureSource::Url(url) => loaded.read().as_ref().and_then(|(cached, result)| {
+                (cached.as_str() == url.as_str())
+                    .then(|| result.as_ref().ok().cloned())
+                    .flatten()
+            }),
+        };
+        let remote = remote.is_some();
+
+        // `full` is as wide as the page: measure that width, then give the SVG the height its
+        // own aspect ratio asks for.
+        let mut measured = use_state(|| 0.0f32);
+        if self.full {
+            let Some(bytes) = bytes else {
+                return image_placeholder(&self.alt, self.radius, Size::fill(), Size::px(80.));
+            };
+            let ratio = svg_ratio(&bytes).unwrap_or(16. / 9.);
+            let width = *measured.read();
+            let content = if width > 0.5 {
+                let fallback =
+                    image_placeholder(&self.alt, self.radius, Size::fill(), Size::px(80.));
+                SvgViewer::new(bytes)
+                    .width(Size::px(width))
+                    .height(Size::px((width / ratio).max(1.)))
+                    .async_rasterization(remote)
+                    .error_renderer(move |_| fallback.clone())
+                    .into_element()
+            } else {
+                rect().into_element()
+            };
+            return rect()
+                .width(Size::fill())
+                .on_sized(move |event: Event<SizedEventData>| {
+                    measured.set_if_modified(event.visible_area.width());
+                })
+                .child(content)
+                .into_element();
+        }
+
+        match bytes {
+            Some(bytes) => {
+                let fallback = image_placeholder(
+                    &self.alt,
+                    self.radius,
+                    self.width.clone(),
+                    self.height.clone(),
+                );
+                SvgViewer::new(bytes)
+                    .width(self.width.clone())
+                    .height(self.height.clone())
+                    .async_rasterization(remote)
+                    .error_renderer(move |_| fallback.clone())
+                    .into_element()
+            }
+            None => image_placeholder(
+                &self.alt,
+                self.radius,
+                self.width.clone(),
+                self.height.clone(),
+            ),
+        }
+    }
 }
 
 fn labeled(node: &ResolvedTree, control: Element) -> Element {
@@ -897,4 +1209,107 @@ fn select_options(node: &ResolvedTree) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"></svg>"#;
+
+    fn data_uri(mime: &str, svg: &str) -> String {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(svg);
+        format!("data:{mime};base64,{encoded}")
+    }
+
+    #[test]
+    fn the_default_policy_is_inline_and_remote() {
+        assert_eq!(
+            ImagePolicy::default(),
+            ImagePolicy {
+                inline: true,
+                files: false,
+                remote: true,
+            }
+        );
+    }
+
+    #[test]
+    fn svg_data_uris_are_recognized() {
+        let media = media_source(&data_uri("image/svg+xml", SVG), ImagePolicy::default())
+            .expect("inline SVG");
+        assert!(media.svg);
+        match media.source {
+            PictureSource::Bytes(bytes) => assert_eq!(&bytes[..], SVG.as_bytes()),
+            PictureSource::Url(_) => panic!("inline image is not remote"),
+        }
+    }
+
+    #[test]
+    fn percent_encoded_svg_data_uris_are_decoded() {
+        let encoded = "%3Csvg%20viewBox%3D%220%200%202%201%22%3E%3C%2Fsvg%3E";
+        let media = media_source(
+            &format!("data:image/svg+xml,{encoded}"),
+            ImagePolicy::default(),
+        )
+        .expect("inline SVG");
+        assert!(media.svg);
+        match media.source {
+            PictureSource::Bytes(bytes) => {
+                assert_eq!(&bytes[..], b"<svg viewBox=\"0 0 2 1\"></svg>")
+            }
+            PictureSource::Url(_) => panic!("inline image is not remote"),
+        }
+    }
+
+    #[test]
+    fn remote_sources_follow_their_extension() {
+        let policy = ImagePolicy::default();
+        assert!(
+            media_source("https://example.com/a.svg", policy)
+                .unwrap()
+                .svg
+        );
+        assert!(
+            !media_source("https://example.com/a.png", policy)
+                .unwrap()
+                .svg
+        );
+        assert!(
+            media_source("http://example.com/a.svg?v=1", policy)
+                .unwrap()
+                .svg
+        );
+        assert!(media_source("https://example.com/a.png", ImagePolicy::inline()).is_none());
+    }
+
+    #[test]
+    fn files_follow_the_content() {
+        let path = std::env::temp_dir().join("freya-hypereffect-picture");
+        std::fs::write(&path, SVG).unwrap();
+        let src = format!("file://{}", path.display());
+        assert!(media_source(&src, ImagePolicy::default()).is_none());
+        let media = media_source(&src, ImagePolicy::all()).expect("file image");
+        assert!(media.svg);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn an_svg_ratio_comes_from_its_size_or_view_box() {
+        assert_eq!(svg_ratio(SVG.as_bytes()), Some(2.));
+        assert_eq!(
+            svg_ratio(br#"<svg width="30px" height="10px"></svg>"#),
+            Some(3.)
+        );
+        assert_eq!(
+            svg_ratio(br#"<svg width="100%" height="100%" viewBox="0 0 4 3"></svg>"#),
+            Some(4. / 3.)
+        );
+        assert_eq!(svg_ratio(b"not an svg"), None);
+        // `width` must be an attribute of its own, not the end of `stroke-width`.
+        assert_eq!(
+            svg_ratio(br#"<svg stroke-width="8" viewBox="0 0 5 1"></svg>"#),
+            Some(5.)
+        );
+    }
 }

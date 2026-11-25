@@ -11,7 +11,8 @@ keywords = ["gui", "ui", "hypereffect", "freya"]
 categories = ["gui"]
 
 [dependencies]
-freya = "0.6.0-alpha"
+freya = { version = "0.6.0-alpha", features = ["remote-asset"] }
+freya-components = { version = "0.6.0-alpha.1", features = ["remote-asset"] }
 hypereffect = "0.7.0"
 serde = "1"
 base64 = "0.22"
