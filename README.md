@@ -18,3 +18,20 @@ HyperView::new(host.clone(), rev)
 - Buttons that ask to open a URL do nothing unless the host decides what to do with them (`ClientHost::on_open`).
 - A server ending the session (`close`) leaves the last interface on screen, with its reason above it, and the user can no longer act on it.
 - The server's mistakes (`diagnostics`: a message it could not apply, an expression that failed) are printed to stderr, never shown in the interface; `ClientHost::on_diagnostic` sends them elsewhere.
+
+## Debugging: seeing a page without a window
+
+`examples/snapshot.rs` draws a recorded flow to a PNG, headless, at the size you give it. Record the state you want with [`copcat`](https://crates.io/crates/copcat) (the first page with `copcat stream`, or after a press with `--record`), then draw it:
+
+```sh
+copcat press <uri> add --record flow.txt
+cargo run --example snapshot -- flow.txt page.png 380 1000   # width and height, 640×900 by default
+```
+
+It feeds the server's lines of the transcript (`< ` ones) to a `ClientHost` and renders what they leave, so it is good for:
+
+- checking how a real merchant's page actually lays out, rather than how the tree reads: wrapping rows, image sizes, alignment;
+- comparing a phone width against a desktop one in one go;
+- looking at a layout change before and after, on the same recording.
+
+Nothing is sent back to the server: it shows one state. Use `copcat` to reach it first.
