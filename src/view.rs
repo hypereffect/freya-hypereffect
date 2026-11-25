@@ -268,22 +268,56 @@ impl Component for NodeView {
         }
 
         let st = self.style;
-        let in_row = node.component == HeComponent::Row && !attr_bool(node, "wrap", false);
+        let is_row = node.component == HeComponent::Row;
+        let wraps = attr_bool(node, "wrap", false);
+        let shown = node.children.iter().filter(|child| visible(child)).count();
+        // A field has a label above it, so a row with one lines its children up on the bottom
+        // edge (the field and the button beside it); other rows center theirs.
+        let form = node.children.iter().any(|c| {
+            matches!(
+                c.component,
+                HeComponent::Input | HeComponent::Select | HeComponent::Slider
+            )
+        });
+        let cross = match attr_str(node, "align").as_str() {
+            "center" if form => Alignment::End,
+            _ => align(node, "align"),
+        };
+        // A wrapping row cannot align its lines (Freya aligns against the whole row, before the
+        // lines are made), so it starts them at the top and puts what has no label of its own
+        // below an empty one: it lines up with the fields beside it all the same.
+        let label_slot = is_row && wraps && form && cross == Alignment::End;
         let children: Vec<Element> = node
             .children
             .iter()
             .filter(|child| visible(child))
             .cloned()
             .map(|child| {
-                let grows = in_row && grows_in_row(&child);
+                let grows = is_row && grows_in_row(&child);
                 let key = DiffKey::from(&child.id);
                 let child = self.child(child);
-                if grows {
+                if grows && wraps {
+                    // A wrapping row has no flex, and a filling child would take the whole line
+                    // and crush the next one instead of wrapping it: give it a share of the line.
+                    rect()
+                        .key(key)
+                        .width(wrap_share(shown, gap(node, st)))
+                        .child(child)
+                        .into_element()
+                } else if grows {
                     // Text and fields share what the buttons leave of the row.
                     rect()
                         .key(key)
                         .width(Size::flex(1.))
                         .min_width(Size::px(96.))
+                        .child(child)
+                        .into_element()
+                } else if label_slot {
+                    rect()
+                        .key(key)
+                        .vertical()
+                        .spacing(2.)
+                        .child(txt(" ", 13., colors.text_secondary, FontWeight::MEDIUM))
                         .child(child)
                         .into_element()
                 } else {
@@ -301,22 +335,10 @@ impl Component for NodeView {
                 .children(children)
                 .into_element(),
             HeComponent::Row => {
-                // A field has a label above it, so a row with one lines its children up on the
-                // bottom edge (the field and the button beside it); other rows center theirs.
-                let form = node.children.iter().any(|c| {
-                    matches!(
-                        c.component,
-                        HeComponent::Input | HeComponent::Select | HeComponent::Slider
-                    )
-                });
-                let cross = match attr_str(node, "align").as_str() {
-                    "center" if form => Alignment::End,
-                    _ => align(node, "align"),
-                };
-                let content = if attr_bool(node, "wrap", false) {
-                    Content::wrap_spacing(gap(node, st))
+                let (content, cross) = if wraps {
+                    (Content::wrap_spacing(gap(node, st)), Alignment::Start)
                 } else {
-                    Content::flex()
+                    (Content::flex(), cross)
                 };
                 rect()
                     .horizontal()
@@ -469,7 +491,8 @@ impl Component for NodeView {
                     let (width, height) = match variant.as_str() {
                         "avatar" => (Size::px(48.), Size::px(48.)),
                         "thumbnail" => (Size::px(120.), Size::px(120.)),
-                        "full" => (Size::fill(), Size::px(300.)),
+                        // as wide as the page, as tall as that makes it
+                        "full" => (Size::fill(), Size::auto()),
                         _ => (Size::fill(), Size::px(160.)),
                     };
                     return ImageViewer::new((src, bytes::Bytes::from(bytes)))
@@ -742,6 +765,23 @@ fn grows_in_row(node: &ResolvedTree) -> bool {
             }
             HeComponent::Badge | HeComponent::Button | HeComponent::Dialog => false,
         }
+}
+
+/// The width of a growing child of a wrapping row of `children`: as many to a line as can be
+/// at least 140 wide, each an equal part of it, and the whole line once that is just one.
+fn wrap_share(children: usize, gap: f32) -> Size {
+    Size::func_data(
+        move |ctx| {
+            let mut per_line = children.max(1);
+            let part = |n: usize| (ctx.parent - (n - 1) as f32 * gap) / n as f32;
+            while per_line > 1 && part(per_line) < 140. {
+                per_line -= 1;
+            }
+            // rounded down, so the parts add up to no more than the line and none wraps early
+            Some(part(per_line).floor().max(0.))
+        },
+        &(children, gap.to_bits()),
+    )
 }
 
 /// The bytes of an image the policy lets through.
