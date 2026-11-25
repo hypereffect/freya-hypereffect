@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use hypereffect::{
-    Map, Value as Json,
+    Log, LogType, Map, Value as Json,
     client::{Client, ResolvedTree},
 };
 use serde::Serialize;
@@ -38,6 +38,13 @@ pub trait HyperHost {
     fn error(&self) -> Option<String> {
         None
     }
+
+    /// The logs the view has not shown yet, oldest first. The view drains them and shows the
+    /// levels it was asked to as toasts. [`ClientHost`] prints every log to the console as it
+    /// arrives, before keeping it for the view.
+    fn take_logs(&mut self) -> Vec<Log> {
+        Vec::new()
+    }
 }
 
 /// A host shared between the component that draws it and whatever feeds it.
@@ -49,6 +56,8 @@ pub struct ClientHost {
     send: Box<dyn FnMut(String)>,
     open: Box<dyn FnMut(String)>,
     diagnostic: Box<dyn FnMut(String)>,
+    log: Box<dyn FnMut(&Log)>,
+    logs: Vec<Log>,
     error: Option<String>,
 }
 
@@ -71,6 +80,8 @@ impl ClientHost {
             send: Box::new(send),
             open: Box::new(|_| {}),
             diagnostic: Box::new(|diagnostic| eprintln!("hypereffect: {diagnostic}")),
+            log: Box::new(print_log),
+            logs: Vec::new(),
             error: None,
         }
     }
@@ -87,6 +98,13 @@ impl ClientHost {
     /// printed to stderr.
     pub fn on_diagnostic(mut self, diagnostic: impl FnMut(String) + 'static) -> Self {
         self.diagnostic = Box::new(diagnostic);
+        self
+    }
+
+    /// Decide where the server's log messages go. By default they are printed to the console.
+    /// The view shows those its levels allow as toasts; this only decides the console side.
+    pub fn on_log(mut self, log: impl FnMut(&Log) + 'static) -> Self {
+        self.log = Box::new(log);
         self
     }
 
@@ -108,6 +126,10 @@ impl ClientHost {
     }
 
     fn report(&mut self) {
+        for log in self.client.take_logs() {
+            (self.log)(&log);
+            self.logs.push(log);
+        }
         for url in self.client.take_opens() {
             (self.open)(url);
         }
@@ -156,6 +178,24 @@ impl HyperHost for ClientHost {
     fn error(&self) -> Option<String> {
         self.error.clone()
     }
+
+    fn take_logs(&mut self) -> Vec<Log> {
+        std::mem::take(&mut self.logs)
+    }
+}
+
+fn print_log(log: &Log) {
+    let level = match log.kind {
+        LogType::Warning => "warning",
+        LogType::Error => "error",
+        LogType::Success => "success",
+        LogType::Info => "info",
+        LogType::Debug => "debug",
+    };
+    match &log.detail {
+        Some(detail) => println!("hypereffect [{level}] {}: {detail}", log.summary),
+        None => println!("hypereffect [{level}] {}", log.summary),
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +229,28 @@ mod tests {
         let mut host = ClientHost::new(|_| {}).on_diagnostic(move |d| log.borrow_mut().push(d));
         host.receive(b"element {\"id\":\"x\",\"type\":\"nonsense\"}\n");
         assert!(!seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn logs_are_logged_and_kept_for_the_view() {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let logged = seen.clone();
+        let mut host =
+            ClientHost::new(|_| {}).on_log(move |log| logged.borrow_mut().push(log.clone()));
+
+        host.receive(
+            b"log {\"summary\":\"Saved\",\"detail\":\"3 files updated\",\"type\":\"success\"}\n",
+        );
+        host.receive(b"log {\"summary\":\"tick\",\"type\":\"debug\"}\n");
+
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].kind, LogType::Success);
+        assert_eq!(seen[0].detail.as_deref(), Some("3 files updated"));
+        assert_eq!(seen[1].kind, LogType::Debug);
+
+        assert_eq!(host.take_logs().len(), 2);
+        assert!(host.take_logs().is_empty());
     }
 
     #[test]

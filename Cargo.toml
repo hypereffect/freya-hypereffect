@@ -1,6 +1,6 @@
 [package]
 name = "freya-hypereffect"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "A Freya renderer for hypereffect, drawn with Freya's own components and theme."
 license = "MIT"

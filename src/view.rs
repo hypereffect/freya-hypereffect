@@ -1,9 +1,13 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
 
 use base64::Engine;
 use freya::prelude::*;
 use freya_components::http::fetch;
-use hypereffect::{Component as HeComponent, Value as Json, client::ResolvedTree};
+use hypereffect::{Component as HeComponent, Log, LogType, Value as Json, client::ResolvedTree};
 
 use crate::{
     SharedHost,
@@ -91,6 +95,68 @@ impl ImagePolicy {
     }
 }
 
+/// Which log levels a [`HyperView`] shows as toasts. Every log is still logged to the console by
+/// [`ClientHost`](crate::ClientHost), whatever is chosen here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogLevels(u8);
+
+impl LogLevels {
+    const WARNING: u8 = 1 << 0;
+    const ERROR: u8 = 1 << 1;
+    const SUCCESS: u8 = 1 << 2;
+    const INFO: u8 = 1 << 3;
+    const DEBUG: u8 = 1 << 4;
+
+    /// No toasts.
+    pub const fn none() -> Self {
+        Self(0)
+    }
+
+    /// Every level, `debug` included.
+    pub const fn all() -> Self {
+        Self(Self::WARNING | Self::ERROR | Self::SUCCESS | Self::INFO | Self::DEBUG)
+    }
+
+    /// Whether `kind` is shown.
+    pub const fn contains(self, kind: LogType) -> bool {
+        self.0 & Self::bit(kind) != 0
+    }
+
+    /// Show `kind` too.
+    pub const fn with(self, kind: LogType) -> Self {
+        Self(self.0 | Self::bit(kind))
+    }
+
+    /// Stop showing `kind`.
+    pub const fn without(self, kind: LogType) -> Self {
+        Self(self.0 & !Self::bit(kind))
+    }
+
+    const fn bit(kind: LogType) -> u8 {
+        match kind {
+            LogType::Warning => Self::WARNING,
+            LogType::Error => Self::ERROR,
+            LogType::Success => Self::SUCCESS,
+            LogType::Info => Self::INFO,
+            LogType::Debug => Self::DEBUG,
+        }
+    }
+}
+
+impl Default for LogLevels {
+    /// Everything except `debug`.
+    fn default() -> Self {
+        Self::all().without(LogType::Debug)
+    }
+}
+
+/// A log being shown, kept until it is pressed or times out.
+#[derive(Clone, PartialEq)]
+struct Toast {
+    id: u64,
+    log: Log,
+}
+
 /// The interface of a [`HyperHost`](crate::HyperHost), drawn with Freya's components in the
 /// colors of the current theme.
 #[derive(Clone)]
@@ -100,6 +166,7 @@ pub struct HyperView {
     images: ImagePolicy,
     style: Style,
     skin: Option<SharedSkin>,
+    toast_levels: LogLevels,
     /// The host's [`revision`](crate::HyperHost::revision) when the view was made.
     revision: u64,
 }
@@ -115,6 +182,7 @@ impl HyperView {
             images: ImagePolicy::default(),
             style: Style::default(),
             skin: None,
+            toast_levels: LogLevels::default(),
             revision,
         }
     }
@@ -136,6 +204,13 @@ impl HyperView {
         self.style = style;
         self
     }
+
+    /// Which log levels to show as toasts. Every level except `debug` by default; use
+    /// [`LogLevels::none`] to keep the interface free of them (they are logged either way).
+    pub fn toast_levels(mut self, levels: LogLevels) -> Self {
+        self.toast_levels = levels;
+        self
+    }
 }
 
 fn same_skin(a: &Option<SharedSkin>, b: &Option<SharedSkin>) -> bool {
@@ -153,6 +228,7 @@ impl PartialEq for HyperView {
             && self.images == other.images
             && self.style == other.style
             && same_skin(&self.skin, &other.skin)
+            && self.toast_levels == other.toast_levels
             && self.revision == other.revision
     }
 }
@@ -175,7 +251,41 @@ impl Component for HyperView {
         let style = self.style;
         let revision = self.revision;
 
-        rect()
+        // Logs are events, not state: drain what the host has kept for us and show the levels
+        // this view was asked to. Each toast goes away on its own after a while.
+        let mut toasts = use_state::<Vec<Toast>>(Vec::new);
+        let next_toast = use_hook(|| Rc::new(Cell::new(0u64)));
+        let fresh: Vec<Log> = self
+            .host
+            .try_borrow_mut()
+            .map(|mut host| {
+                host.take_logs()
+                    .into_iter()
+                    .filter(|log| self.toast_levels.contains(log.kind))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !fresh.is_empty() {
+            let mut added = Vec::with_capacity(fresh.len());
+            {
+                let mut current = toasts.write();
+                for log in fresh {
+                    let id = next_toast.get();
+                    next_toast.set(id + 1);
+                    current.push(Toast { id, log });
+                    added.push(id);
+                }
+            }
+            for id in added {
+                spawn(async move {
+                    timer(Duration::from_secs(5)).await;
+                    toasts.write().retain(|toast| toast.id != id);
+                });
+            }
+        }
+        let shown = toasts.read().clone();
+
+        let page = rect()
             .vertical()
             .width(Size::fill())
             .spacing(style.space_medium)
@@ -202,7 +312,33 @@ impl Component for HyperView {
                     closed,
                 }
                 .into_element()
-            }))
+            }));
+
+        rect()
+            .width(Size::fill())
+            .child(page)
+            .maybe(!shown.is_empty(), |el| {
+                el.child(
+                    rect()
+                        .position(
+                            Position::new_absolute()
+                                .top(style.space_medium)
+                                .right(style.space_medium),
+                        )
+                        .layer(1)
+                        .vertical()
+                        .spacing(style.space_small)
+                        .width(Size::percent(80.))
+                        .max_width(Size::px(360.))
+                        .children(shown.into_iter().map(|toast| {
+                            let id = toast.id;
+                            let mut toasts = toasts;
+                            render_toast(toast, style, &colors, move |_| {
+                                toasts.write().retain(|toast| toast.id != id);
+                            })
+                        })),
+                )
+            })
     }
 }
 
@@ -746,6 +882,38 @@ pub(crate) fn txt(text: impl Into<String>, size: f32, color: Color, weight: Font
         .text(text.into())
 }
 
+/// One log, colored by its level, in the toast stack.
+fn render_toast(
+    toast: Toast,
+    style: Style,
+    colors: &ColorsSheet,
+    on_press: impl FnMut(Event<PressEventData>) + 'static,
+) -> Element {
+    let Toast { id, log } = toast;
+    let Log {
+        summary,
+        detail,
+        kind,
+    } = log;
+    let color = log_color(kind, colors);
+    rect()
+        .key(DiffKey::U64(id))
+        .vertical()
+        .width(Size::fill())
+        .spacing(2.)
+        .padding((style.space_small, style.space_medium))
+        .corner_radius(style.radius)
+        .background(color.with_a(40))
+        .border(Border::new().fill(color.with_a(120)).width(1.))
+        .cursor(CursorIcon::Pointer)
+        .on_press(on_press)
+        .child(txt(summary, 14., color, FontWeight::SEMI_BOLD))
+        .map(detail, |el, detail| {
+            el.child(txt(detail, 12., colors.text_secondary, FontWeight::NORMAL))
+        })
+        .into_element()
+}
+
 /// A button that is highlighted while it is the current choice of a set.
 fn choice(
     text: String,
@@ -1193,6 +1361,16 @@ fn tone_color(variant: &str, colors: &ColorsSheet) -> Color {
     }
 }
 
+fn log_color(kind: LogType, colors: &ColorsSheet) -> Color {
+    match kind {
+        LogType::Warning => colors.warning,
+        LogType::Error => colors.error,
+        LogType::Success => colors.success,
+        LogType::Info => colors.info,
+        LogType::Debug => colors.text_secondary,
+    }
+}
+
 fn select_options(node: &ResolvedTree) -> Vec<(String, String)> {
     node.attrs
         .get("options")
@@ -1220,6 +1398,28 @@ mod tests {
     fn data_uri(mime: &str, svg: &str) -> String {
         let encoded = base64::engine::general_purpose::STANDARD.encode(svg);
         format!("data:{mime};base64,{encoded}")
+    }
+
+    #[test]
+    fn every_level_is_toasted_by_default_except_debug() {
+        let levels = LogLevels::default();
+        assert!(levels.contains(LogType::Warning));
+        assert!(levels.contains(LogType::Error));
+        assert!(levels.contains(LogType::Success));
+        assert!(levels.contains(LogType::Info));
+        assert!(!levels.contains(LogType::Debug));
+        assert!(LogLevels::all().contains(LogType::Debug));
+        assert!(!LogLevels::none().contains(LogType::Error));
+        assert!(
+            LogLevels::none()
+                .with(LogType::Error)
+                .contains(LogType::Error)
+        );
+        assert!(
+            !LogLevels::all()
+                .without(LogType::Info)
+                .contains(LogType::Info)
+        );
     }
 
     #[test]

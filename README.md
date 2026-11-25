@@ -18,6 +18,7 @@ HyperView::new(host.clone(), rev)
 - Buttons that ask to open a URL do nothing unless the host decides what to do with them (`ClientHost::on_open`).
 - A server ending the session (`close`) leaves the last interface on screen, with its reason above it, and the user can no longer act on it.
 - The server's mistakes (`diagnostics`: a message it could not apply, an expression that failed) are printed to stderr, never shown in the interface; `ClientHost::on_diagnostic` sends them elsewhere.
+- The server's logs (`log`: a summary, optional detail, and a level) are always printed to the console, `debug` included; `ClientHost::on_log` sends them elsewhere. The view also shows them as toasts: every level except `debug` by default, and `HyperView::toast_levels` chooses exactly which. Toasts can be pressed away.
 
 ## Debugging: seeing a page without a window
 
